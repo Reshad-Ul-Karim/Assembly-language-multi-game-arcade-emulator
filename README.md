@@ -28,6 +28,10 @@ This project is a multi-game arcade emulator written in **Assembly language**, d
 
 This project is a collection of classic arcade games implemented in **Assembly language**. The goal is to demonstrate the power and efficiency of low-level programming while providing a fun and nostalgic gaming experience. Each game is designed to run in a DOS environment, leveraging **BIOS interrupts** and **direct hardware manipulation** for optimal performance.
 
+<div align="center">
+  <img src="images/Menu interface.png" alt="Multi-Game Arcade Menu" width="400"/>
+</div>
+
 The project includes:
 - **Space Car:** A fast-paced game where the player controls a spaceship, avoiding asteroids and collecting coins.
 - **Snake:** A classic game where the player controls a growing snake, collecting food while avoiding collisions.
@@ -39,6 +43,10 @@ The project includes:
 
 ### Space Car
 **File:** `SPACECAR.ASM`
+
+<div align="center">
+  <img src="images/Space Car.png" alt="Space Car Game Screenshot" width="600"/>
+</div>
 
 Space Car is a fast-paced arcade game where the player controls a spaceship, avoiding asteroids and collecting coins. The game features:
 - **Dynamic Difficulty:** The speed of the game increases as the player progresses through levels.
@@ -55,6 +63,10 @@ Space Car is a fast-paced arcade game where the player controls a spaceship, avo
 ### Snake
 **File:** `snake.asm`
 
+<div align="center">
+  <img src="images/Snake Game.png" alt="Snake Game Screenshot" width="600"/>
+</div>
+
 Snake is a classic game where the player controls a growing snake, collecting food while avoiding collisions with the walls and its own tail. The game features:
 - **VGA Graphics:** 320x200 resolution with 256 colors for enhanced visual experience.
 - **Score System:** Points are awarded for each piece of food collected (10 points per food).
@@ -69,6 +81,10 @@ Snake is a classic game where the player controls a growing snake, collecting fo
 
 ### Rapid Roll
 **File:** `RR.asm`
+
+<div align="center">
+  <img src="images/Rapid Roll.png" alt="Rapid Roll Game Screenshot" width="600"/>
+</div>
 
 Rapid Roll is an exciting ball-rolling game where the player controls a ball that rolls down through various colored blocks. The game features:
 - **Health System:** Players start with 3 lives and must avoid dangerous blocks.
@@ -146,9 +162,14 @@ The games directly access hardware components such as:
      menu.bat
      ```
    - A menu will appear with options to select and play any of the three games:
-     - **Space Car**
-     - **Snake** 
-     - **Rapid Roll**
+
+<div align="center">
+  <img src="images/Menu interface.png" alt="Game Menu Interface" width="500"/>
+</div>
+
+   - **Space Car**
+   - **Snake** 
+   - **Rapid Roll**
 
 ### Compilation Instructions (Optional)
 If you want to modify and recompile the games, follow these steps:
