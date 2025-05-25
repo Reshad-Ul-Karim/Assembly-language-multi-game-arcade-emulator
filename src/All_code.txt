@@ -1,0 +1,4712 @@
+;mount c (directory)
+;c:
+;menu.bat
+
+; AUTHOR: Reshad
+
+;=========================================================================================================
+;---------------------------------------------------------------------------------------------------------
+; STACK Segment
+;---------------------------------------------------------------------------------------------------------
+;=========================================================================================================
+STACKS    SEGMENT PARA STACK
+	db      64 DUP('DADA007 ')              ; 8 * 64 = 512 bytes, used to track stack usage
+STACKS    ENDS                                    ; If more than 512 bytes are used, the 'DADA007 ' text will be erased
+						; Maximum for each Segment is 64kbytes
+
+;=========================================================================================================
+;---------------------------------------------------------------------------------------------------------
+; VARIABLES Segment
+;---------------------------------------------------------------------------------------------------------
+;=========================================================================================================
+DATAS    SEGMENT PARA
+; Strings printed on screen during program execution
+; Note: 13 = carriage return, 10 = line feed
+		mex1    db      '                         ----> S P A C E - C A R <----',13,10,'$' ; 30 CHARACTERS -> 25 SPACES ON LEFT TO CENTER
+		mex2    db      ' The game consists of avoiding asteroids and collecting as many coins',13,10,'$'
+		mex2b   db      ' as possible to create a new RECORD!',13,10,'$'
+		mex3    db      ' Use arrow keys (Right and Left) to move',13,10,'$'
+		mex4    db      ' Hearts are lives, you can accumulate up to 5',13,10,'$'
+		mex5    db      ' Once you run out of lives, the game ends',13,10,'$'
+		mex6    db      ' Up/Down Arrow:  Increase/Decrease level (speed)',13,10,'$'
+		mEsc    db      ' ESC:             Exit game immediately',13,10,'$'
+		mPausa  db      ' P:               Pause the game',13,10,'$'
+		mInitialiser db      ' Press ENTER to start the race',13,10,'$'
+
+		cInitialiser db      '                                   ','$'        ; Used to clear mInitialiser without clearing the screen
+		lescape   db      'Press ENTER to return to DOS  ','$'
+
+		lPause  db      'PAUSE                              ','$'
+		lLose   db      'GAME OVER                          ','$'
+		lWin    db      'You reached the maximum score!','$'
+
+		fScore  db      'Final score: ','$'
+		fLife   db      'Remaining lives: ','$'
+
+		lDead   db      'YOU CRASHED INTO AN ASTEROID!','$'
+		llkey  db      'Press a key to continue    ','$'
+		lEnter  db      'Press ENTER to continue       ','$'
+
+		mLife   db      'LIFE: ','$'
+		mLevel  db      'LEVEL: ','$'
+		mScore  db      'SCORE: ','$'
+
+		lLife   db      '+1 LIFE     ','$'
+		lScore  db      '+1 SCORE    ','$'
+		lLevelU db      '+1 LEVEL    ','$'
+		lLevelD db      '-1 LEVEL    ','$'
+		life    dw      3       ; Initial number of lives
+		level   dw      1       ; Starting level
+		score   dw      0H      ; Starting score
+		tLevel  dw      10H     ; Cycles at first level (16 = 10H)
+
+		maxScore dw     1000     ; Maximum score to end the game
+
+		lempty  db      '                   ','$'
+
+	; Variables for random number generation
+		PrimoIN  DB     00H           ; First execution flag (= 0 yes; <> 0 no)
+		Rnd_Lo   DW     ?             ; Current 32-bit random number value
+		Rnd_Hi   DW     ?
+		CONSTANT DW     8405H         ; Multiplier value
+
+DATAS    ENDS
+
+
+
+
+
+
+;=========================================================================================================
+;---------------------------------------------------------------------------------------------------------
+;PROGRAM Segment
+;---------------------------------------------------------------------------------------------------------
+;=========================================================================================================
+_prog    SEGMENT  PARA 'CODE'    ;Code Segment, Stack Segment and Data Segment allocation
+	ASSUME  CS:_prog,        SS:STACKS,        DS:DATAS        ;ASSUME forces correct segment use for all segment symbols
+	ORG 0100H       ;leave first 100H locations free
+	initialiser: JMP     Main    ;start from Main label
+
+	;=========================================================================================================
+	;KEYS (CONSTANTS)
+	;=========================================================================================================
+	kESC    EQU     1bh             ;ESC key
+	kEnter  EQU     0dh             ;ENTER key
+	kUp     EQU     4800h           ;up arrow movement
+	kDown    EQU     5000h           ;down arrow movement
+	kRight     EQU     4d00h           ;right arrow movement
+	kLeft     EQU     4b00h           ;left arrow movement
+	limDX   EQU     27              ;right limit for spaceship (right frame column)
+	limSX   EQU     2               ;left limit for spaceship (left frame column)
+
+;=========================================================================================================
+;---------------------------------------------------------------------------------------------------------
+;MACROS
+;---------------------------------------------------------------------------------------------------------
+;=========================================================================================================
+setCur MACRO row,column       ;Macro that chooses where to position the Cursor
+	PUSH DX
+	MOV DH,row             ;row
+	MOV DL,column          ;column
+	CALL posCur             ;calls posCur procedure - INT10H 02H that positions cursor
+	POP DX
+ENDM
+;=========================================================================================================
+stpChrT MACRO char              ;prints in TTY mode (updates cursor)
+	PUSH AX
+	MOV AL,char             ;choose character passed as parameter
+	CALL writeTTY           ;calls procedure
+	POP AX
+ENDM
+;=========================================================================================================
+stpChrC MACRO char,num,col      ;prints n colored characters
+	PUSH AX
+	PUSH CX
+	MOV AL,char             ;choose character passed as parameter
+	MOV CX,num
+	MOV BL,col
+	CALL writeCOL           ;calls procedure
+	POP CX
+	POP AX
+ENDM
+;=========================================================================================================
+stpChrBN MACRO char             ;prints a character in Black and White
+	PUSH AX
+	MOV AL,char             ;choose character passed as parameter
+	CALL writeBN            ;calls procedure
+	POP AX
+ENDM
+;=========================================================================================================
+Random  MACRO num       ;remember to do a PUSH AX if necessary
+			;EX: num=10 random number goes from 0 to 9
+	MOV AX,num      ;puts in Random procedure input the AX value
+	CALL rand
+ENDM
+;=========================================================================================================
+stpMex  MACRO mex       ;prints a message saved in memory (Data Segment)
+	PUSH AX
+	PUSH BX
+	PUSH DX
+	MOV AX,SEG DATAS
+	MOV DS,AX
+	MOV DX,OFFSET mex
+	MOV AH,09H
+	INT 21H
+	POP DX
+	POP BX
+	POP AX
+ENDM
+;=========================================================================================================
+delayer MACRO tick      ;creates a delay (1 tick = 0.55 ms -> 18H ticks = 1 second)
+	PUSH CX
+	MOV CX,tick
+	CALL delay      ;calls delay procedure based on clock
+	POP CX
+ENDM
+;=========================================================================================================
+
+;=========================================================================================================
+;---------------------------------------------------------------------------------------------------------
+;START OF THE PROGRAM
+;---------------------------------------------------------------------------------------------------------
+;=========================================================================================================
+
+;NB:    in DX will save the position of the spaceship
+;       in BX will save the obstacle/coin/life (BL=Type)  x=asteroid, v=life, m=coin
+;       CX is the cycle counter
+
+Main:           CALL cls        ;clear screen
+		setCur 0,0
+		stpMex mex1     ;print the instructions on the screen
+		setCur 2,0
+		stpMex mex2
+		stpMex mex2b
+		stpMex mex3
+		stpMex mex4
+		stpMex mex5
+		stpMex mex6
+		stpMex mEsc
+		stpMex mPausa
+		setCur 11,1
+		stpMex llkey
+		CALL outCur
+		CALL waitKey    ;wait for a key to continue
+
+Start:          ;every time you hit an asteroid, you start over from here
+		CALL cls        ;clear screen
+		CALL WBORDER     ;draw border
+
+	;PRINT THE LIVES
+		setCur 4,40
+		stpMex mLife
+		setCur 4,50
+		stpChrC 03H,life,04H    ;print the hearts
+
+	;PRINT THE LEVEL
+		setCur 6,40
+		stpMex mLevel
+		setCur 6,50
+		stpChrC 09H,level,09H   ;print the dots (which represent the level number)
+
+	;PRINT THE SCORE
+		setCur 8,40
+		stpMex mScore
+		setCur 8,50
+		MOV AX,score
+		CALL word2dec           ;print the score
+
+
+	;POSITION THE SPACESHIP AT THE BOTTOM CENTER
+		MOV DH,20       ;row
+		MOV DL,14       ;column
+		CALL setCar     ;position the spaceship
+
+
+		setCur 15,40    ;AREA WHERE MESSAGES ARE PRINTED
+		stpMex mInitialiser  ;start of the level, waits for an enter
+		CALL outCur
+reqEnter:       CALL waitKey    ;wait for the ENTER key
+		CMP AL,kEnter
+		JNE reqEnter
+		setCur 15,40
+		stpMex cInitialiser
+
+
+		;CALL outCur    ;hide the cursor
+		MOV BX,0000H    ;initialize each cycle the obstacle/life/coin controller
+cycle:          MOV CH,BYTE PTR tLevel   ;set the initial level (speed)
+		MOV CL,0        ;initialize the cycle counter to increment
+
+
+		CMP CH,CL       ;if I have changed level and
+		JBE Continue3   ;CH is less than or equal to CL -> I start the cycle again
+				;if I don't put this control the program can get stuck
+				;for example if CL is 0AH and CH has reached 0BH while I have changed the level
+				;JBE = jump below or equal
+
+		PUSH DX
+		setCur 15,40    ;delete the interactive message
+		stpMex lempty   ;of the previous cycle
+		POP DX
+		CMP BL,'m'      ;if I took a coin, increase the score
+		 JE addMon
+		CMP BL,'v'
+		 JE ADDLIFE     ;if I took a heart, increase the lives (unless they are already 5)
+
+Continue3:      JMP AspKey
+
+addMon:         PUSH AX         ;I took a coin
+		 MOV AX,score   ;I could also directly "INC score"
+		 ;INC AX         ;increase the score
+		 ADD AX,level    ;instead of increasing by 1 unit, I add the level value
+		 MOV score,AX
+		 setCur 8,50    ;position the cursor in the SCORE area:
+		 CALL word2dec  ;print the ascii/decimal value of the score variable
+		 setCur 15,40   ;position the cursor in the MESSAGES area
+		 stpMex lScore  ;write +1 SCORE
+		POP AX
+		MOV BX,0000H    ;initialize obstacle/life/coin controller
+		JMP AspKey
+
+ADDLIFE:        CMP life,5      ;I took a heart
+		JAE life5       ;if lives are greater than or equal to 5 then do not add more lives
+		PUSH AX
+		 MOV AX,life
+		 INC AX         ;increase the life variable
+		 MOV life,AX
+		 setCur 4,50    ;position the cursor in the LIFE area:
+		 stpChrC 03H,life,04H   ;print as many red hearts as lives
+		 setCur 15,40   ;position the cursor in the MESSAGES area
+		 setCur 4,50    ;position the cursor in the LIFE area:
+		 stpChrC 03H,life,04H   ;print as many red hearts as lives
+		 setCur 15,40   ;position the cursor in the MESSAGES area
+		 stpMex lLife   ;write +1 LIFE
+		POP AX
+life5:          MOV BX,0000H    ;initialize the obstacle/life/coin controller
+		JMP AspKey
+
+
+AspKey:
+		CMP BL,'x'      ;check if I hit an asteroid
+		JE Dead2        ;if hit -> go to Dead2
+		CALL setCar     ;check if I hit an obstacle or collected a coin/life and position the spaceship
+		delayer 01H     ;18 "waits" per second
+		INC CL          ;increment the 18 waits counter
+		CMP CL,CH       ;If CL=CH then we are at the end of the cycle (18 waits have passed if the cycle is one second)
+		JE Continue2    ;move down a line
+		CALL pressKey   ;otherwise check if a key is pressed
+		JZ AspKey        ;if no key is pressed, wait again
+		 CALL waitKey    ;otherwise check which key was pressed
+		 CMP AL,kESC     ;press ESC
+		 JE  exitGame2       ;exit to DOS
+		 CMP AL,'P'      ;press P
+		 JE I_Pause      ;put the game in Pause
+		 CMP AL,'p'      ;press p (lowercase)
+		 JE I_Pause      ;put the game in Pause
+		 CMP AX,kRight      ;press Right arrow - kRight EQU 4D00H
+		 JE moveRight2
+		 CMP AX,kLeft      ;press Left arrow - kLeft EQU 4B00H
+		 JE moveLeft2
+		 CMP AX,kUp      ;press Up arrow
+		 JE moveUp2
+		 CMP AX,kDown     ;press Down arrow
+		 JE moveDown2
+		 ;CMP AL,'h'      ;INCREASE SCORE BY 100
+		 ;JE HintA2
+		 ;CMP AL,'H'      ;DECREASE SCORE BY 100
+		 ;JE HintB2
+		 JMP keyTest2      ;go to print the pressed key
+
+
+;----------labels for too long JUMPs-------------
+;Win2:           JMP Win
+Dead2:          JMP Dead
+moveRight2:        JMP moveRight
+moveLeft2:      JMP moveLeft
+exitGame2:          JMP exitGame
+Continue2:      JMP Continue
+keyTest2:         JMP keyTest
+moveUp2:            JMP moveUp
+moveDown2:           JMP moveDown
+;HintA2:         JMP HintA
+;HintB2:         JMP HintB
+;AspKey2:        JMP AspKey
+;------------labels for too long JUMPs-----------
+
+
+;-----PAUSE Management------------------------------
+I_Pause:        PUSH AX
+		PUSH BX
+		PUSH CX
+		PUSH DX
+		setCur 15,40    ;WRITE "PAUSE" in the MESSAGES area
+		stpMex lPause
+Pause:          CALL waitKey    ;wait for a key
+		CMP AL,kESC     ;ESC key
+		JE exitGame2         ;go to exitGame
+		CMP AL,'P'      ;P key
+		JE F_Pause       ;End the Pause
+		CMP AL,'p'      ;p key
+		JE F_Pause       ;End the Pause
+		JMP Pause       ;otherwise continue the pause -> loop Pause
+F_Pause:        setCur 15,40    ;ERASE the "PAUSE" text
+		stpMex lempty
+		POP DX
+		POP CX
+		POP BX
+		POP AX
+		JMP AspKey      ;go to AspKey
+;-----PAUSE Management-------------------------------
+
+AspKey2:        JMP AspKey
+
+moveRight:         ;move the spaceship to the right
+		CMP DL,limDX    ;check if the spaceship has reached the right edge
+		JE AspKey2      ;if it has reached the right limit and I want to move it further right, the program blocks it there
+		 INC DX         ;otherwise I can move it one character to the right
+		 PUSH DX
+		 SUB DX,2       ;move the cursor to the area where the spaceship was before moving right
+		 CALL posCur
+		 stpChrBN ' '   ;put a ' ' character to the left where the spaceship was before
+		 POP DX
+	;print control characters
+		;PUSH DX
+		;setCur 21,35
+		;stpChrBN 'R'
+		;setCur 21,36
+		;stpChrBN CL
+		;POP DX
+	;end print control characters
+		JMP AspKey      ;wait for the next key
+
+moveLeft:       ;move the spaceship to the left
+		CMP DL,limSX    ;check if the spaceship has reached the left edge
+		JE AspKey2      ;if it has reached the left limit and I want to move it further left, the program blocks it there
+		 DEC DX         ;otherwise I can move it one character to the left
+		 PUSH DX
+		 ADD DX,2       ;move the cursor to where the spaceship was before being moved left
+		 CALL posCur
+		 stpChrBN ' '   ;put a ' ' character where the spaceship was before
+		 POP DX
+	;print control characters
+		;PUSH DX
+		;setCur 21,35
+		;stpChrBN 'L'
+		;setCur 21,36
+		;stpChrBN CL
+		;POP DX
+	;end print control characters
+		JMP AspKey      ;wait for the next key
+
+moveUp:             ;up one level
+		CMP level,8     ;check if we are at level 8
+		JAE level8      ;if the level is greater than or equal to 8 then do not add more levels
+		 PUSH AX
+		 MOV AX,level   ;otherwise add a level
+		 INC AX
+		 MOV level,AX
+		  MOV AX,tLevel ;decrease the cycle duration by 2 ticks
+		  SUB AX,2
+		  MOV tLevel,AX
+		 setCur 6,50    ;position the cursor in the LEVEL area:
+		 stpChrC 09H,level,09H  ;print the number of levels (blue dots)
+		 setCur 15,40   ;position the cursor in the MESSAGES area
+		 stpMex lLevelU ;print +1 LEVEL
+		POP AX
+level8:          MOV BX,0000H    ;initialize the obstacle/life/coin controller
+		JMP aspKey
+
+moveDown:            ;down one level
+		CMP level,1
+		JBE level1  ;if the level is less than or equal to 1 then do not lower the level
+		PUSH AX
+		 MOV AX,level
+		 DEC AX     ;otherwise decrement the level
+		 MOV level,AX
+		  MOV AX,tLevel ;increase the cycle duration by 2 ticks
+		  ADD AX,2
+		  MOV tLevel,AX
+		 setCur 6,50
+		 stpMex lempty  ;erase the previous levels to print fewer dots than before (otherwise the level decrement is not noticeable)
+		 setCur 6,50    ;position the cursor in the LEVEL area:
+		 stpChrC 09H,level,09H  ;print the level number (blue dots)
+		 setCur 15,40   ;position the cursor in the MESSAGES area
+		 stpMex lLevelD ;write -1 LEVEL
+		POP AX
+level1:          MOV BX,0000H    ;initialize the obstacle/life/coin controller
+		JMP aspKey
+
+
+keyTest:          ;if I press any key, it does nothing
+		;I leave the label in case I want to use other keys in the future
+		;or I want the program to do something with generic keys
+		;print control characters
+		;PUSH DX
+		;setCur 20,35
+		;stpChrBN AL
+		;POP DX
+		JMP AspKey
+
+Continue:       CALL GODOWN      ;make the obstacles "descend" one line
+		;now draw the new obstacles/life/coin (with different probabilities)
+		Random 99      ;random number between 0 and 99 (100 total numbers)
+		CMP AX,95
+		 JAE LIFE        ;greater than or equal to 95 -> life (5% probability)
+		CMP AX,25
+		 JB COIN      ;less than 25 -> coin (25% probability)
+		CALL wOst       ;otherwise -> print an obstacle (the remaining 73% probability)
+		JMP Next
+
+LIFE:           CALL wLife      ;print a life
+		JMP Next
+COIN:         CALL wMon       ;print a coin
+		JMP Next
+
+Dead:           ;PUSH AX
+		;MOV AX,life
+		;DEC AX
+		;MOV life,AX
+		;POP AX
+		DEC life        ;decrement a life
+		CMP life,0      ;if life is zero -> Game Over
+		JE Lose
+		 CALL setCar    ;otherwise restart the game with one less life
+		 PUSH DX
+		 setCur 4,50            ;position the cursor in the LIFE area:
+		 stpChrC 03H,life,04H   ;update the number of hearts
+		 setCur 15,40           ;position the cursor in the MESSAGES area
+		 stpMex lDead           ;print the message "You hit an asteroid"
+		 setCur 16,40
+		 stpMex lEnter          ;print "Press enter to continue"
+		 POP DX
+
+aspEnter:        CALL waitKey           ;wait for the ENTER key
+		CMP AL,kEnter           ;to restart the game with one less life
+		JNE aspEnter
+		JMP Start
+
+
+Next:           CALL outCur     ;hide the cursor
+
+		PUSH AX         ;check if I reached the maximum score
+		MOV AX,maxScore ;I cannot compare two variables
+		CMP score,AX    ;so I put one of them in AX
+		POP AX
+		JAE Win
+
+		JMP cycle       ;continue with the Loop and go to the cycle label
+
+Lose:           ;CALL cls
+		PUSH DX
+		setCur 15,40    ;position the cursor in the MESSAGES area
+		stpMex lLose    ;write GAME OVER
+		POP DX
+		CALL setCar
+		JMP Exit
+
+Win:            PUSH DX
+		setCur 15,40
+		stpMex lWin
+		POP DX
+		CALL setCar
+
+Exit:           setCur 17,40
+		stpMex fScore   ;print the final score
+		setCur 17,59    ;score value area
+		PUSH AX
+		MOV AX,score
+		CALL word2dec   ;decimal value of the score
+		POP AX
+		;POP DX
+		CALL waitKey    ;wait for a key
+
+
+exitGame:           setCur 19,40
+		stpMex lescape    ;print the exit message
+WAITENTER:        CALL waitKey    ;wait for enter to exit
+		CMP AL,kEnter
+		JNE WAITENTER
+		CALL cls
+		CALL tornaDOS   ;call the procedure to return to DOS
+
+
+;=========================================================================================================
+;---------------------------------------------------------------------------------------------------------
+;PROCEDURES
+;---------------------------------------------------------------------------------------------------------
+;============================================================================
+WBORDER PROC NEAR        ;draws the game border
+		;PRINT TOP ROW
+		setCur 0,0      ;position cursor at top left
+		stpChrT 0DAH    ;print top left corner
+		MOV CX,28       ;set loop to 28 times (columns)
+CYCLER1:        stpChrT 0C4H    ;print top line
+		LOOP CYCLER1    ;until reaching column 29
+		stpChrT 0BFH    ;where it prints top right corner
+
+		;PRINT LEFT COLUMN
+		MOV DH,01H      ;set row to 2
+		MOV DL,00H      ;set column to 0 (fixed) - first column
+		MOV CX,20       ;set loop to 20 times (rows)
+CYCLEC1:        CALL posCur     ;position cursor at DH,DL (row,column)
+		stpChrT 0B3H    ;print | character for left column
+		inc DH          ;increase counter (move to next row)
+		LOOP CYCLEC1    ;for 20 times
+
+		;PRINT RIGHT COLUMN
+		MOV DH,01H      ;set row to 2
+		MOV DL,29       ;set column to 29 (fixed) - 30th column
+		MOV CX,0020     ;set loop to 20 times (rows)
+CYCLEC2:        CALL posCur     ;position cursor at DH,DL (row,column)
+		stpChrT 0B3H     ;print | character for right column
+		inc DH          ;increase counter (move to next row)
+		LOOP CYCLEC2    ;for 20 times
+
+		;PRINT BOTTOM ROW
+		setCur 21,0     ;position cursor at row 22, column 0
+		stpChrT 0C0H     ;print bottom left corner
+		MOV CX,28     ;set loop to 28 times (columns)
+CYCLER2:        stpChrT 0C4H     ;print line to create row
+		LOOP CYCLER2    ;for 28 times
+		stpChrT 0D9H     ;print bottom right corner
+
+		;CREATED A 22 ROWS X 30 COLUMNS RECTANGLE
+
+WBORDER  ENDP
+;============================================================================
+rand    PROC    NEAR        ;function that creates a random number between 0<n<AX
+	OR      AX,AX           ;if the range value passed as parameter
+	JNZ     Rand_1          ;is null, procedure ends immediately
+	RET                     ;(incorrect value!)
+
+Rand_1: PUSH    BX          ;Save registers used by procedure
+	PUSH    CX
+	PUSH    DX
+	PUSH    DI
+	PUSH    DS
+	PUSH    AX              ;Save range value, passed as input
+							;parameter (will be used at the end)
+	LEA     DI,PrimoIN      ;Check if this is the first call
+      CMP Byte Ptr DS:[DI],00H  ;of the procedure that generates the delay
+	JNE     Rand_2          ;if NOT, calculate new value
+
+	MOV     AH,2CH          ;If this is the first call, the procedure
+	INT     21H             ;gets a random value from CMOS memory containing current time
+	MOV     DS:[Rnd_Lo],CX  ;Uses DOS Function 2CH which
+							;leaves in CH = Hours     (0-23)
+							;               in CL = Minutes  (0-59)
+							;       in DH = Seconds (0-59)
+							;       in DL = Hundredths of seconds (0-99)
+	MOV Byte Ptr DS:[DI],01H  ;Modifies first entry byte to avoid
+							;reloading initial random variables
+
+							;Instructions for first round
+Rand_2: MOV     AX,DS:[Rnd_Lo]  ;AH=Hours     (0-23), AL=Minutes    (0-59)
+	MOV     BX,DS:[Rnd_Hi]  ;BH=Seconds (0-59), BL=Hundredths (0-99)
+	MOV     CX,AX           ;CH=Hours     (0-23), CL=Minutes    (0-59)
+
+	MUL     DS:[CONSTANT]   ;AX*CONSTANT=AX*8405H=DX,AX (32-bit number)
+
+	SHL     CX,1            ;Random number calculation algorithm
+	SHL     CX,1
+	SHL     CX,1
+	ADD     CH,CL
+	ADD     DX,CX
+	ADD     DX,BX
+	SHL     BX,1
+	SHL     BX,1
+	ADD     DX,BX
+	ADD     DH,BL
+	MOV     CL,5
+	SHL     BX,CL
+	ADD     AX,1
+	ADC     DX,0
+
+	MOV     DS:[Rnd_Lo],AX  ;Save 32-bit result of manipulation
+	MOV     DS:[Rnd_Hi],DX  ;in variables intended for this purpose
+
+	POP     BX              ;Recover in BX the range value, passed in
+							;input, in AX
+	XOR     AX,AX           ;Prepare 32-bit dividend by forcing to zero
+	XCHG    AX,DX           ;the most significant 16 bits and copying into the 16
+							;low bits the current value of DX
+	DIV     BX              ;AX = quotient (DX,AX / BX)
+							;DX = remainder
+	XCHG    AX,DX           ;current random number is the remainder value
+							;and is left, in output, in AX
+	POP     DS
+	POP     DI              ;Recover registers used by procedure
+	POP     DX
+	POP     CX
+	POP     BX
+	RET
+rand  ENDP
+;============================================================================
+delay PROC NEAR         ;CX=18 for a 0.55ms*18 = 1second delay
+	PUSH AX         ;save registers
+	PUSH BX
+	PUSH DX
+
+	PUSH CX         ;the value of CX is put in BX
+	POP BX          ;in BX is the value chosen as delay
+	CALL clock      ;returns in CX,DX the system time (32bit)
+	ADD DX,BX       ;add a total of TICK (CX) to DX (low part of time)
+	JNC Delay_0     ;if no carry go to Delay_0
+	INC CX          ;otherwise add carry to CX
+Delay_0: PUSH CX        ;copy in AX,BX the tick count relative to the first read
+	PUSH DX         ;AGGIORNED with the tick count corresponding to the desired DELAY
+	POP BX          ;in practice in AX,BX is the future time to reach
+	POP AX
+Delay_1: PUSH AX        ;save in the stack the data of AX,BX (time to reach)
+	PUSH BX
+	CALL clock      ;save the data of the NEW read in CX,DX
+	POP BX          ;and in AX,BX is always the data of the time to reach
+	POP AX
+
+	CMP AX,CX       ;compare the high part of the two times
+	JZ Delay_2      ;if they are the same check the low part (Dela_2)
+			;otherwise means (almost always) that they differ by the carry
+	PUSH AX         ;save the high part
+	SUB AX,CX       ;check if they differ, maybe by a different number from 1
+	CMP AX,18H      ;because if the difference is 18H it's almost midnight
+	POP AX
+	JNZ Delay_1     ;if not midnight (difference < 18H) go back to Delay_1 to continue waiting
+
+	PUSH BX         ;if midnight (difference 18H)
+	SUB BX,00B0H    ;so CX,DX is passed from 0018-00AFH to 0000-0000H
+	CMP BX,DX       ;so also the low part must be adjusted to the new situation
+	POP BX
+	JG Delay_1      ;if still greater BX,DX continue waiting
+	JMP Delay_3     ;otherwise no more waiting - delay consumed!
+
+Delay_2: CMP BX,DX      ;if the high part is the same and the low part of
+	JG Delay_1      ;current time is less, BX>DX -> continue waiting
+
+Delay_3: POP DX         ;the delay is consumed!
+	POP BX
+	POP AX
+
+	RET             ;return
+
+delay ENDP
+;=========================================================================================================
+wLife PROC NEAR         ;prints a random heart
+	PUSH DX
+	PUSH CX
+	PUSH BX
+	PUSH AX
+	Random 27       ;random column between 0 and 27 (puts the value in AX)
+	INC AX          ;random column between 1 and 28 (within the border)
+	setCur 1,AL     ;choose the low part of the random number (high part is always zero)
+	MOV BH,0        ;video page 0
+	MOV CX,1        ;print one character
+	MOV AL,03H      ;choose the heart character
+	MOV BL,04H      ;choose red on black color
+	CALL PRINTER     ;print the character
+	POP AX
+	POP BX
+	POP CX
+	POP DX
+	RET
+wLife ENDP
+;=========================================================================================================
+wMon PROC NEAR       ;prints a random coin
+	PUSH DX
+	PUSH CX
+	PUSH BX
+	PUSH AX
+	Random 27       ;random column between 0 and 27 (puts the value in AX)
+	INC AX          ;random column between 1 and 28 (within the border)
+	setCur 1,AL     ;choose the low part of the random number (high part is always zero)
+	MOV BH,0        ;video page 0
+	MOV CX,1        ;print one character
+	MOV AL,0FH      ;choose the coin (sun) character
+	MOV BL,0EH      ;choose yellow on black color
+	CALL PRINTER     ;print the character
+	POP AX
+	POP BX
+	POP CX
+	POP DX
+	RET
+wMon ENDP
+;=========================================================================================================
+wOst PROC NEAR       ;prints a random obstacle
+	PUSH DX
+	PUSH CX
+	PUSH BX
+	PUSH AX
+	Random 27       ;random column between 0 and 27 (puts the value in AX)
+	INC AX          ;random column between 1 and 28 (within the border)
+	setCur 1,AL     ;choose the low part of the random number (high part is always zero)
+	MOV BH,0        ;video page 0
+	MOV CX,1        ;print one character
+	MOV AL,0B1H     ;choose the boulder character
+	MOV BL,08H      ;choose gray on black color
+	CALL PRINTER     ;print the character
+	POP AX
+	POP BX
+	POP CX
+	POP DX
+	RET
+wOst ENDP
+;============================================================================
+GODOWN PROC NEAR
+	PUSH AX
+	PUSH BX
+	PUSH CX
+	PUSH DX
+	MOV AH,07H      ;function moves a part of the screen down
+	MOV AL,01H      ;num rows
+	MOV CH,1        ;row top left angle
+	MOV CL,1        ;col top left angle
+	MOV DH,20       ;row bottom right angle
+	MOV DL,28       ;col bottom right angle
+			;from 1,1 to 28,20 (in row 0 and 22 there is the frame)
+	MOV BH,07H      ;color of empty rows black (DEFAULT 07H)
+	INT 10H
+	POP DX
+	POP CX
+	POP BX
+	POP AX
+	RET             ;returns
+GODOWN ENDP
+;=========================================================================================================
+writeTTY PROC Near      ;AL=char,CX=num of times
+	PUSH BX
+	MOV BH,00H      ;Page 0
+	MOV BL,70H      ;White on black
+	MOV AH,0EH      ;Function 0EH of INT 10H (Prints one or more colored characters on the screen)
+	INT 10H
+	POP BX
+	RET             ;returns
+writeTTY ENDP
+;=========================================================================================================
+writeCOL PROC Near      ;AL=char,CX=num of times,BL=color
+	MOV BH,00H      ;Page 0
+	MOV AH,09H      ;Function 09H of INT 10H (Prints one or more colored characters on the screen)
+	INT 10H
+	RET             ;returns
+writeCOL ENDP
+;=========================================================================================================
+writeBN PROC Near      ;AL=char,CX=num of times
+	PUSH BX
+	PUSH CX
+	MOV BH,00H      ;Page 0
+	MOV BL,70H      ;White on Black
+	MOV CX,1        ;print ONE character
+	MOV AH,0AH      ;Function 0AH of INT 10H (Prints one or more characters)
+	INT 10H
+	POP CX
+	POP BX
+	RET             ;returns
+writeBN ENDP
+;=========================================================================================================
+PRINTER PROC    Near     ;AL=char,CX=num of times,BL=color
+	MOV AH,09H      ;Function 09H of INT 10H (Prints CX colored characters on the screen)
+	INT 10H
+	RET                     ;returns
+PRINTER ENDP
+;=========================================================================================================
+clock PROC NEAR         ;puts the current time in the registers:
+	MOV AH,00H      ;CX=high part of the clock
+	INT 1AH         ;DX=low part of the clock
+	RET
+clock ENDP
+;=========================================================================================================
+waitKey PROC NEAR       ;waits for a key
+	MOV AH,00H      ;function 00H of INT 16H that waits for a key
+	INT 16H
+			;AL=ascii code, AH=scan code
+	RET             ;returns
+waitKey ENDP
+;============================================================================
+pressKey PROC NEAR
+	MOV AH,01H      ;if key pressed, modifies ZERO FLAG
+	INT 16H
+	RET
+pressKey ENDP
+;============================================================================
+posCur PROC    Near     ;Procedure that positions the cursor
+	PUSH AX
+	PUSH BX
+	PUSH DX
+	MOV BH,00H      ;video page 0 (the visible one)
+	MOV AH,02H      ;function 02H of INT 10H that positions the cursor in DH,DL (row,column)
+	INT 10H
+	POP DX
+	POP BX
+	POP AX
+	RET             ;returns
+posCur ENDP
+;============================================================================
+setCar PROC NEAR        ;DH=row,DL=column
+	PUSH AX
+	PUSH CX
+	PUSH DX
+	MOV CX,0000H
+
+	CALL posCur     ;position the cursor
+	 CMP BX,0000H   ;if BX is zero then it has not yet touched anything
+	 JNE asd1       ;skip the check
+	 CALL checkCar   ;check if it has touched something
+asd1:    CALL posCur
+	stpChrBN 1EH    ;I can print the central character
+
+	INC DX          ;I move to the right
+	CALL posCur
+	 CMP BX,0000H   ;if BX is zero then it has not yet touched anything
+	 JNE asd2       ;skip the check
+	 CALL checkCar
+asd2:   CALL posCur
+	stpChrBN '>'    ;print the character on the right
+
+	SUB DX,2        ;I move 2 to the left
+	CALL posCur
+	 CMP BX,0000H   ;if BX is zero then it has not yet touched anything
+	 JNE asd3       ;skip the check
+	 CALL checkCar
+asd3:   CALL posCur
+	stpChrBN '<'    ;I can print the character on the left
+
+	;PRINT CHARACTER TO CHECK
+	;PUSH DX
+	;setCur 18,60    ;print the obstacle that I touched
+	;stpChrBN CH
+	;POP DX
+
+	CMP CH,'M'      ;I took a coin
+	 JE COIN_2
+	CMP CH,'X'      ;I took a boulder
+	 JE ROCK_2
+	CMP CH,'V'      ;I took a life
+	 JE LIFE_2
+	JMP CONT_2
+
+COIN_2: JMP CONT_2    ;I leave the code as it is in case I want to make subsequent changes
+
+ROCK_2:  JMP CONT_2
+
+LIFE_2:   JMP CONT_2
+
+
+CONT_2: INC DX
+	CALL posCur
+
+	POP DX
+	POP CX
+	POP AX
+	RET                     ;returns
+setCar ENDP
+;============================================================================
+checkCar PROC NEAR ;DH=row,DL=column
+	CMP CL,01H      ;CL checks if something has already been taken
+	JE CONT_1       ;CL=1 skip the check because it is not needed and go to the end
+
+	CALL readCur    ;check the ASCII character pointed by the cursor AL=character, AH=color
+	CMP AH,08H      ;if it's gray -> boulder
+	 JE ROCK_1
+	CMP AH,0EH      ;if it's yellow -> coin
+	 JE COIN_1
+	CMP AH,04H
+	 JE LIFE_1      ;if it's red -> life
+	CMP AH,07H
+	 JE NOTHING_1    ;takes nothing
+	JMP CONT_1
+
+ROCK_1: MOV CL,01H     ;set CL to 1 to say that I touched something
+	 MOV CH,'X'     ;in CH I save the value of the type of obstacle (in CH it lasts a tick)
+	 MOV BL,'x'     ;in BL I save the value of the type of obstacle (in BL it lasts a cycle)
+	 JMP CONT_1
+
+COIN_1: MOV CL,01H    ;set CL to 1 to say that I touched something
+	  MOV CH,'M'    ;in CH I save the value of the type of obstacle (in CH it lasts a tick)
+	  MOV BL,'m'    ;in BL I save the value of the type of obstacle (in BL it lasts a cycle)
+	  JMP CONT_1
+
+LIFE_1:   MOV CL,01H    ;set CL to 1 to say that I touched something
+	  MOV CH,'V'    ;in CH I save the value of the type of obstacle (in CH it lasts a tick)
+	  MOV BL,'v'    ;in BL I save the value of the type of obstacle (in BL it lasts a cycle)
+	  JMP CONT_1
+
+NOTHING_1: MOV CH,'_'    ;control character
+	  JMP CONT_1
+
+CONT_1:   RET
+
+checkCar ENDP
+;=========================================================================================================
+Word2Dec PROC NEAR      ;transforms the hexadecimal word provided in AX into the corresponding ASCII characters
+	PUSH    AX
+	PUSH    BX
+	PUSH    DX
+	CMP     AX,10000        ;If the hexadecimal number in input is less
+	JC      Wor2_0          ;than 10000 the next division is avoided
+	MOV     DX,0000H        ;(DX,AX=0000XXXX):(BX=10000)=AX, remainder DX
+	MOV     BX,10000        ;Prepare the divisor to 10000
+	DIV     BX              ;Performs the division
+	CALL    STAasci         ;Prints the value of the Tens of Thousands
+	MOV     AX,DX           ;Moves in AX the  Rest  RRRR  of the  division
+	JMP     SHORT Wor2_1    ;previous to divide  in the  next phase
+Wor2_0: CMP     AX,1000     ;If the hexadecimal number in input is less
+	JC      Byt2_0          ;than 1000  the next division is avoided
+Wor2_1: MOV     DX,0000H    ;(DX,AX=0000XXXX):(BX=1000)=AX, remainder DX
+	MOV     BX,1000         ;Prepare the divisor to 1000
+	DIV     BX              ;Performs the division
+	CALL    STAasci         ;Prints the value of the Thousands
+	MOV     AX,DX           ;Moves in AX the  Rest  RRRR  of the  division
+	JMP     SHORT Byt2_1    ;previous to divide in the  next phase
+
+;Byte2Dec
+	PUSH    AX              ;Saves the Registers used by the Procedure, including-
+	PUSH    BX              ;the value to convert, passed in input in AL
+	PUSH    DX              ;formats the dividend to the value AX=00XX
+Byt2_0: CMP     AX,100      ;If the hexadecimal number in input is less
+	JC      Byt2_2          ;than 100 the  next division is avoided
+Byt2_1: MOV     BL,100      ;Prepare the divisor to 100
+	DIV     BL              ;Divide AX=00XX for BL=100 (AX:BL=AL, remainder AH)
+	CALL    STAasci         ;Prints the value of the Hundreds
+	MOV     AL,AH           ;Moves in AL the Rest RR of the previous division
+	MOV     AH,00H          ;to divide  in the  next phase,
+	JMP     SHORT Byt2_3    ;formatting the dividend to the value AX=00RR
+Byt2_2: CMP     AX,10       ;If the hexadecimal number in input  is less
+	JC      Byt2_4          ;than 10 the next  division  is  avoided
+Byt2_3: MOV     BL,10       ;Prepare the divisor to 10
+	DIV     BL              ;Divide AX=00XX for BL=10  (AX:BL=AL, remainder AH)
+	CALL    STAasci         ;Prints the value of the Tens
+	MOV     AL,AH           ;Prepare in AL the digit of the Units
+Byt2_4: CALL    STAasci     ;Prints the value of the Units
+	POP     DX
+	POP     BX
+	POP     AX
+	RET
+Word2Dec ENDP
+;========================================================================================================
+STAasci PROC NEAR             ;prints the ascii value of the number in AL
+	PUSH    AX
+	ADD     AL,30H        ;add 30 to the number to have the ASCII character of the number
+	stpChrT AL
+	POP     AX
+	RET
+STAasci ENDP
+;=========================================================================================================
+readCur PROC NEAR             ;reads the value of the ASCII character pointed by the cursor
+	MOV AH,08H
+	MOV BH,00H
+	INT 10H               ;returns in AH=Color, AL=Character
+	RET
+readCur ENDP
+;=========================================================================================================
+outCur PROC    Near             ;Procedure that hides the cursor from the video
+	PUSH CX                 ;based on the procedure resize cursor (in height)
+	PUSH AX                 ;(if the bit 5 of CH is 1 then the cursor disappears)
+	MOV CH,20H              ;start line of pixel
+	MOV CL,00H              ;end line of pixel
+	MOV AH,01H
+	INT 10H
+	POP AX
+	POP CX
+	RET                     ;returns
+outCur ENDP
+;============================================================================
+cls PROC Near
+	MOV AL,03H              ;video mode 80columns x 24rows
+	MOV AH,00H              ;also creates a clear screen
+	INT 10H
+	RET
+cls ENDP
+;============================================================================
+tornaDOS PROC NEAR
+	MOV AH,4CH
+	INT 21H
+tornaDOS ENDP
+;============================================================================
+
+_prog    ENDS                   ;END PROGRAM SEGMENT
+	END     initialiser          ;end Program, everything written after is ignored!
+
+
+
+;=============
+;=============
+;Rapid roll code here
+
+
+.MODEL SMALL
+
+.STACK 100H
+
+.DATA
+ 
+ XCUBE DW 184 
+ X1CUBE DW ?
+ X2CUBE DW ?
+ YCUBE DW 50 
+ Y1CUBE DW ?  
+ Y2CUBE DW ?
+ 
+ XLINE DW 100
+ X1LINE DW ?
+ X2LINE DW ?
+ YLINE DW 190
+ Y1LINE DW ?  
+ Y2LINE DW ?
+ 
+ NXLINE DW 160 
+ NX1LINE DW ?
+ NX2LINE DW ?
+ NYLINE DW 70 
+ NY1LINE DW ?  
+ NY2LINE DW ?
+             
+ NNXLINE DW 30
+ NNX1LINE DW ?
+ NNX2LINE DW ?
+ NNYLINE DW 140
+ NNY1LINE DW ?  
+ NNY2LINE DW ?   
+ 
+ NNNXLINE DW 230
+ NNNX1LINE DW ?
+ NNNX2LINE DW ?
+ NNNYLINE DW 100
+ NNNY1LINE DW ?  
+ NNNY2LINE DW ?
+             
+ CHECK DW 1
+ 
+ RANDNUMBER DW 0 
+ 
+ TIK DW ?  
+ 
+ CHECK_UND DW 0
+ NCHECK_UND DW 0 
+ NNCHECK_UND DW 0  
+ NNNCHECK_UND DW 0
+  
+ RATE DW 1  
+ 
+ SCOREMSG DB 'Score: $'
+ SCORE DW 0 
+ SCORE1 DW 0  
+ HIGHSCORE DW 0
+ 
+ COUNT DW 3
+ COUNT1 DW 3 
+ 
+ X DW 1
+ Y DW 1 
+ 
+ BORDERX DW 1
+ BORDERY DW 16 
+                
+  MSG DB 0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,'             RAPID ROLL$'  
+ MSG1 DB 0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,'       PRESS 1 TO START THE GAME$'
+ MSG2 DB 0AH,0DH,0AH,0DH,'       PRESS 2 FOR HELP$'
+ MSG3 DB 0AH,0DH,0AH,0DH,'       PRESS 3 TO EXIT THE GAME$'
+ MSG4 DB 0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,'           BRACU CSE 341 PROJECT$'   
+ MSG5 DB 0AH,0DH,0AH,0DH,'   PREPARED BY SAMMAM,RESHAD & MEHERAB$' 
+ MSG6 DB 0AH,0DH,' LIFE REMAINING: 3$'
+ MSG7 DB 0AH,0DH,' LIFE REMAINING: 2$'
+ MSG8 DB 0AH,0DH,' LIFE REMAINING: 1$'  
+ MSG9 DB '                SCORE: $'   
+ MSG10 DB 0AH,0DH,'LIFE REMAINING:$'
+ 
+ 
+ IMSG1 DB 0AH,0DH,' YOU HAVE A SMALL CUBE THAT FALLS ALONG'
+      db 0AH,0DH,0AH,0DH,' THROUGH THE SCREEN. BY CONTINUING IN'
+      db 0AH,0DH,0AH,0DH,' YOUR DESCEND THROUGH LEVELS OF THE '
+      db 0AH,0DH,0AH,0DH,' GAME,YOU GAIN POINTS'
+      db 0AH,0DH,0AH,0DH,0AH,0DH,' CONTROLS:'
+      db 0AH,0DH,0AH,0DH,' PRESS A TO MOVE LEFT'
+      db 0AH,0DH,0AH,0DH,' PRESS D TO MOVE RIGHT'
+      db 0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,' PRESS ANY KEY TO GET BACK$'      
+
+  GAMEOVERMSG DB 0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,'              GAME OVER'
+              DB 0AH,0DH,0AH,0DH,0AH,0DH,'            YOUR SCORE: $'
+        
+  GAMEOVERMSG1 DB 0AH,0DH,0AH,0DH,0AH,0DH,'         PRESS P TO PLAY AGAIN$'  
+  
+  GAMEOVERMSG2 DB 0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,0AH,0DH,'        YOU FORFEITED THE GAME$' 
+  
+  GAMEOVERMSG3 DB 0AH,0DH,0AH,0DH,0AH,0DH,'           PRESS X TO EXIT$'  
+  
+  
+  HIGHESTMSG  DB  0AH,0DH,0AH,0DH,'           HIGHEST SCORE: 100$'   
+  HIGHESTMSG2 DB  0AH,0DH,0AH,0DH,0AH,0DH,'           HIGHEST SCORE: $' 
+  
+  SCORE_ARRAY DB ? ;2,2,3,0,0
+  
+.CODE 
+
+
+PLAY_AGAIN PROC   
+    
+  MOV XCUBE , 184
+  MOV YCUBE , 50
+ 
+  MOV XLINE , 100
+  MOV YLINE , 190
+ 
+  MOV NXLINE , 160
+  MOV NYLINE , 70
+             
+  MOV NNXLINE , 30
+  MOV NNYLINE , 140
+ 
+  MOV NNNXLINE , 230
+  MOV NNNYLINE , 100
+
+  RET
+ 
+PLAY_AGAIN ENDP 
+
+PLAY_AGAIN_2 PROC
+ 
+ MOV XCUBE , 36
+ MOV YCUBE , 56
+
+ RET
+ 
+PLAY_AGAIN_2 ENDP
+                        
+UPDRAWCUBE PROC 
+    MOV BX,XCUBE
+    MOV X1CUBE,BX
+    MOV X2CUBE,BX
+    ADD X1CUBE,7
+    
+    MOV BX,YCUBE
+    MOV Y1CUBE,BX
+    MOV Y2CUBE,BX
+    SUB Y1CUBE,7
+
+LUP:
+    MOV AH,0CH
+    MOV AL,12     ;L.RED COLOR
+    MOV CX,XCUBE
+    MOV DX,YCUBE
+    INT 10H
+    INC XCUBE
+    MOV BX,X1CUBE
+    CMP XCUBE,BX
+    JLE LUP
+    MOV BX,X2CUBE
+    MOV XCUBE,BX
+    DEC YCUBE
+    MOV BX,Y1CUBE
+    CMP YCUBE,BX
+    JNE LUP
+    
+    RET
+    
+ENDP UPDRAWCUBE
+
+DOWNDRAWCUBE PROC 
+    MOV BX,XCUBE
+    MOV X1CUBE,BX
+    MOV X2CUBE,BX
+    ADD X1CUBE,7
+    
+    MOV BX,YCUBE
+    MOV Y1CUBE,BX
+    MOV Y2CUBE,BX
+    ADD Y1CUBE,7
+
+LDOWN:
+    MOV AH,0CH
+    MOV AL,12     ; L.RED COLOR
+    MOV CX,XCUBE
+    MOV DX,YCUBE
+    INT 10H
+    INC XCUBE
+    MOV BX,X1CUBE
+    CMP XCUBE,BX
+    JLE LDOWN
+    
+    MOV BX,X2CUBE
+    MOV XCUBE,BX
+    INC YCUBE
+    MOV BX,Y1CUBE
+    CMP YCUBE,BX
+    JNE LDOWN
+    
+    RET
+    
+ENDP DOWNDRAWCUBE
+
+UPRMVCUBE PROC  
+    
+    MOV BX,X2CUBE          
+    MOV XCUBE,BX
+    
+    MOV BX,XCUBE
+    MOV X1CUBE,BX
+    MOV X2CUBE,BX
+    ADD X1CUBE,7
+    
+    MOV BX,Y2CUBE
+    MOV YCUBE,BX
+
+L1:
+    MOV AH,0CH
+    MOV AL,0
+    MOV CX,XCUBE
+    MOV DX,YCUBE
+    INT 10H
+    INC XCUBE
+    MOV BX,X1CUBE
+    CMP XCUBE,BX
+    JLE L1
+    
+    MOV BX,X2CUBE
+    MOV XCUBE,BX
+    DEC YCUBE
+    
+    MOV BX,Y1CUBE
+    CMP YCUBE,BX
+    JNE L1
+    
+    MOV BX,X2CUBE
+    MOV XCUBE,BX
+    MOV BX,Y2CUBE
+    MOV YCUBE,BX 
+           
+    RET
+           
+ENDP UPRMVCUBE 
+
+DOWNRMVCUBE PROC 
+    
+    MOV BX,X2CUBE           
+    MOV XCUBE,BX
+     
+    MOV BX,XCUBE
+    MOV X1CUBE,BX
+    MOV X2CUBE,BX
+    ADD X1CUBE,7 
+     
+    MOV BX,Y2CUBE
+    MOV YCUBE,BX
+
+L1DOWN:
+    MOV AH,0CH
+    MOV AL,0
+    MOV CX,XCUBE
+    MOV DX,YCUBE
+    INT 10H
+    INC XCUBE
+    MOV BX,X1CUBE
+    CMP XCUBE,BX
+    JLE L1DOWN
+    MOV BX,X2CUBE
+    MOV XCUBE,BX
+    INC YCUBE
+    MOV BX,Y1CUBE
+    CMP YCUBE,BX
+    JNE L1DOWN
+    
+    MOV BX,X2CUBE
+    MOV XCUBE,BX
+    MOV BX,Y2CUBE
+    MOV YCUBE,BX 
+           
+    RET
+           
+ENDP DOWNRMVCUBE  
+
+CHECK_UP_OR_DOWN PROC  
+    
+    MOV BX,YLINE
+    SUB BX,3
+    CMP YCUBE,BX
+    JE NEXTPHASE
+    DEC BX     
+    CMP YCUBE,BX
+    JE  NEXTPHASE  
+    MOV CHECK_UND,0
+    JMP DID
+    
+    NEXTPHASE:
+    MOV BX,XLINE
+    ADD BX,57
+    CMP XCUBE,BX
+    JL NEXTPHASE1
+    MOV CHECK_UND,0
+    JMP DID
+    
+    NEXTPHASE1:
+    MOV BX,XLINE
+    SUB BX,9
+    CMP BX,XCUBE
+    JL LASTPHASE
+    MOV CHECK_UND,0
+    JMP DID
+    
+    LASTPHASE:
+    MOV CHECK_UND,1
+    
+    DID:
+    RET
+ENDP CHECK_UP_OR_DOWN
+
+NCHECK_UP_OR_DOWN PROC
+    
+    MOV BX,NYLINE
+    SUB BX,3
+    CMP YCUBE,BX
+    JE  NNEXTPHASE
+    DEC BX     
+    CMP YCUBE,BX
+    JE  NNEXTPHASE  
+    MOV NCHECK_UND,0
+    JMP NDID
+    
+    NNEXTPHASE:
+    MOV BX,NXLINE
+    ADD BX,57
+    CMP XCUBE,BX
+    JL NNEXTPHASE1
+    MOV NCHECK_UND,0
+    JMP NDID
+    
+    NNEXTPHASE1:
+    MOV BX,NXLINE
+    SUB BX,9
+    CMP BX,XCUBE
+    JL NLASTPHASE
+    MOV NCHECK_UND,0
+    JMP NDID
+    
+    NLASTPHASE:
+    MOV NCHECK_UND,1
+    
+    NDID:
+    RET
+ENDP NCHECK_UP_OR_DOWN
+
+NNCHECK_UP_OR_DOWN PROC
+    
+    MOV BX,NNYLINE
+    SUB BX,3
+    CMP YCUBE,BX
+    JE NNNEXTPHASE
+    DEC BX     
+    CMP YCUBE,BX
+    JE  NNNEXTPHASE  
+    MOV NNCHECK_UND,0
+    JMP NNDID
+    
+    NNNEXTPHASE:
+    MOV BX,NNXLINE
+    ADD BX,57
+    CMP XCUBE,BX
+    JL NNNEXTPHASE1
+    MOV NNCHECK_UND,0
+    JMP NNDID
+    
+    NNNEXTPHASE1:
+    MOV BX,NNXLINE
+    SUB BX,9
+    CMP BX,XCUBE
+    JL NNLASTPHASE
+    MOV NNCHECK_UND,0
+    JMP NNDID
+    
+    NNLASTPHASE:
+    MOV NNCHECK_UND,1
+    
+    NNDID:
+    RET
+ENDP NNCHECK_UP_OR_DOWN
+
+NNNCHECK_UP_OR_DOWN PROC    
+    
+    MOV BX,NNNYLINE
+    SUB BX,3
+    CMP YCUBE,BX
+    JE  NNNNEXTPHASE
+    DEC BX     
+    CMP YCUBE,BX
+    JE  NNNNEXTPHASE
+    MOV NNNCHECK_UND,0
+    JMP NNNDID
+    
+    NNNNEXTPHASE:
+    MOV BX,NNNXLINE
+    ADD BX,57
+    CMP XCUBE,BX
+    JL NNNNEXTPHASE1
+    MOV NNNCHECK_UND,0
+    JMP NNNDID
+    
+    NNNNEXTPHASE1:
+    MOV BX,NNNXLINE
+    SUB BX,9
+    CMP BX,XCUBE
+    JL NNNLASTPHASE
+    MOV NNNCHECK_UND,0
+    JMP NNNDID
+    
+    NNNLASTPHASE:
+    MOV NNNCHECK_UND,1
+    
+    NNNDID:
+    RET
+ENDP NNNCHECK_UP_OR_DOWN
+   
+             
+DELAY PROC    
+   
+    ;Reports the current time of day
+    MOV AX,00H
+    INT 1AH
+    MOV TIK,DX  ; LOW ORDER PART OF CLOCK COUNT
+    ADD TIK,3H
+   
+  DELAYL:
+    
+    MOV AX,00H
+    INT 1AH
+    CMP TIK,DX
+    JGE DELAYL
+    
+    CMP CHECK,0
+    JE DDD
+    
+    ;DIRECT CHARACTER INPUT WITHOUT ECHO
+    MOV AH,7
+    INT 21H
+    DEC CHECK
+  
+   DDD:
+    RET
+
+DELAY ENDP  
+
+DELAY2 PROC    
+   
+    MOV AX,00H
+    INT 1AH
+    MOV TIK,DX 
+    ADD TIK,2H
+   
+  DELAYL2:
+    
+    MOV AX,00H
+    INT 1AH
+    CMP TIK,DX
+    JGE DELAYL2
+    
+    CMP CHECK,0
+    JE DDD2
+    
+    MOV AH,7
+    INT 21H
+    DEC CHECK
+  
+   DDD2:
+    RET
+
+DELAY2 ENDP       
+
+DELAY3 PROC    
+   
+    MOV AX,00H
+    INT 1AH
+    MOV TIK,DX 
+    ADD TIK,1H
+   
+  DELAYL3:
+    
+    MOV AX,00H
+    INT 1AH
+    CMP TIK,DX
+    JGE DELAYL3
+    
+    CMP CHECK,0
+    JE DDD3
+    
+    MOV AH,7
+    INT 21H
+    DEC CHECK
+  
+   DDD3:
+    RET
+
+DELAY3 ENDP  
+
+DELAY4 PROC    
+   
+    MOV AX,00H
+    INT 1AH
+    MOV TIK,DX 
+   
+  DELAYL4:
+    
+    MOV AX,00H
+    INT 1AH
+    CMP TIK,DX
+    JGE DELAYL4
+    
+    CMP CHECK,0
+    JE DDD4
+    
+    MOV AH,7
+    INT 21H
+    DEC CHECK
+  
+   DDD4:
+    RET
+
+DELAY4 ENDP 
+
+DELAY5 PROC    
+   
+    MOV AX,00H
+    INT 1AH
+    MOV TIK,DX 
+    SUB TIK,1H
+   
+  DELAYL5:
+    
+    MOV AX,00H
+    INT 1AH
+    CMP TIK,DX
+    JGE DELAYL5
+    
+    CMP CHECK,0
+    JE DDD5
+    
+    MOV AH,7
+    INT 21H
+    DEC CHECK
+  
+   DDD5:
+    RET
+
+DELAY5 ENDP 
+ 
+DRAWLINE PROC
+    
+    MOV BX,XLINE
+    MOV X1LINE,BX
+    MOV X2LINE,BX
+    ADD X1LINE,55  
+    
+    MOV BX,YLINE
+    MOV Y1LINE,BX
+    MOV Y2LINE,BX
+    SUB Y1LINE,3    
+    
+  LINE:
+  
+    MOV AH,0CH
+    MOV AL,4    ; RED COLOR
+    MOV CX,XLINE
+    MOV DX,YLINE
+    INT 10H
+    INC XLINE
+    MOV BX,X1LINE
+    CMP XLINE,BX
+    JLE LINE
+    
+    MOV BX,X2LINE
+    MOV XLINE,BX
+    DEC YLINE
+    MOV BX,Y1LINE
+    CMP YLINE,BX
+    JNE LINE
+    
+    RET 
+    
+DRAWLINE ENDP   
+ 
+RMVLINE PROC 
+    
+    MOV BX,XLINE
+    MOV X1LINE,BX
+    MOV X2LINE,BX
+    ADD X1LINE,55
+               
+    MOV XLINE,BX
+    MOV BX,Y2LINE
+    MOV YLINE,BX
+
+LINE1: 
+
+    MOV AH,0CH
+    MOV AL,0     ;BACKGROUND COLOR(BLACK)
+    MOV CX,XLINE
+    MOV DX,YLINE
+    INT 10H
+    INC XLINE
+    MOV BX,X1LINE
+    CMP XLINE,BX
+    JLE LINE1 
+    
+    MOV BX,X2LINE
+    MOV XLINE,BX
+    DEC YLINE
+    MOV BX,Y1LINE
+    CMP YLINE,BX
+    JNE LINE1
+    
+    MOV BX,X2LINE
+    MOV XLINE,BX
+    MOV BX,Y2LINE
+    MOV YLINE,BX 
+           
+    RET
+           
+RMVLINE ENDP  
+
+DRAWNLINE PROC
+    
+    MOV BX,NXLINE
+    MOV NX1LINE,BX
+    MOV NX2LINE,BX
+    ADD NX1LINE,55
+    
+    MOV BX,NYLINE
+    MOV NY1LINE,BX
+    MOV NY2LINE,BX
+    SUB NY1LINE,3
+    
+    NLINE:
+    MOV AH,0CH
+    MOV AL,3      ; CYAN COLOR
+    MOV CX,NXLINE
+    MOV DX,NYLINE
+    INT 10H
+    INC NXLINE
+    MOV BX,NX1LINE
+    CMP NXLINE,BX
+    JLE NLINE
+    
+    MOV BX,NX2LINE
+    MOV NXLINE,BX
+    DEC NYLINE
+    MOV BX,NY1LINE
+    CMP NYLINE,BX
+    JNE NLINE
+     
+    RET
+    
+DRAWNLINE ENDP   
+ 
+RMVNLINE PROC 
+    
+    MOV BX,NXLINE
+    MOV NX1LINE,BX
+    MOV NX2LINE,BX
+    ADD NX1LINE,55
+               
+    MOV NXLINE,BX
+    MOV BX,NY2LINE
+    MOV NYLINE,BX
+
+NLINE1:  
+
+    MOV AH,0CH
+    MOV AL,0
+    MOV CX,NXLINE
+    MOV DX,NYLINE
+    INT 10H
+    INC NXLINE
+    MOV BX,NX1LINE
+    CMP NXLINE,BX
+    JLE NLINE1 
+    
+    MOV BX,NX2LINE
+    MOV NXLINE,BX
+    DEC NYLINE
+    MOV BX,NY1LINE
+    CMP NYLINE,BX
+    JNE NLINE1
+    
+    MOV BX,NX2LINE
+    MOV NXLINE,BX
+    MOV BX,NY2LINE
+    MOV NYLINE,BX 
+           
+    RET
+           
+RMVNLINE ENDP 
+
+DRAWNNLINE PROC
+    
+    MOV BX,NNXLINE
+    MOV NNX1LINE,BX
+    MOV NNX2LINE,BX
+    ADD NNX1LINE,55
+    
+    MOV BX,NNYLINE
+    MOV NNY1LINE,BX
+    MOV NNY2LINE,BX
+    SUB NNY1LINE,3
+    
+    NNLINE:
+    MOV AH,0CH
+    MOV AL,13       ; MAGENTA COLOR
+    MOV CX,NNXLINE
+    MOV DX,NNYLINE
+    INT 10H
+    INC NNXLINE
+    MOV BX,NNX1LINE
+    CMP NNXLINE,BX
+    JLE NNLINE
+    
+    MOV BX,NNX2LINE
+    MOV NNXLINE,BX
+    DEC NNYLINE
+    MOV BX,NNY1LINE
+    CMP NNYLINE,BX
+    JNE NNLINE
+    
+    
+     
+    NNDIDI:
+    
+    RET
+DRAWNNLINE ENDP  
+ 
+RMVNNLINE PROC 
+    
+    MOV BX,NNXLINE
+    MOV NNX1LINE,BX
+    MOV NNX2LINE,BX
+    ADD NNX1LINE,55
+               
+    MOV NNXLINE,BX
+    MOV BX,NNY2LINE
+    MOV NNYLINE,BX
+
+NNLINE1:
+    MOV AH,0CH
+    MOV AL,0
+    MOV CX,NNXLINE
+    MOV DX,NNYLINE
+    INT 10H
+    INC NNXLINE
+    MOV BX,NNX1LINE
+    CMP NNXLINE,BX
+    JLE NNLINE1 
+    
+    MOV BX,NNX2LINE
+    MOV NNXLINE,BX
+    DEC NNYLINE
+    MOV BX,NNY1LINE
+    CMP NNYLINE,BX
+    JNE NNLINE1
+    
+    MOV BX,NNX2LINE
+    MOV NNXLINE,BX
+    MOV BX,NNY2LINE
+    MOV NNYLINE,BX 
+           
+    RET
+           
+RMVNNLINE ENDP   
+
+DRAWNNNLINE PROC
+    
+    MOV BX,NNNXLINE
+    MOV NNNX1LINE,BX
+    MOV NNNX2LINE,BX
+    ADD NNNX1LINE,55
+    
+    MOV BX,NNNYLINE
+    MOV NNNY1LINE,BX
+    MOV NNNY2LINE,BX
+    SUB NNNY1LINE,3
+    
+    NNNLINE:
+    MOV AH,0CH
+    MOV AL,2        ; GREEN COLOR
+    MOV CX,NNNXLINE
+    MOV DX,NNNYLINE
+    INT 10H
+    INC NNNXLINE
+    MOV BX,NNNX1LINE
+    CMP NNNXLINE,BX
+    JLE NNNLINE
+    
+    MOV BX,NNNX2LINE
+    MOV NNNXLINE,BX
+    DEC NNNYLINE
+    MOV BX,NNNY1LINE
+    CMP NNNYLINE,BX
+    JNE NNNLINE
+    
+    
+     
+    NNNDIDI:
+    
+    RET
+DRAWNNNLINE ENDP   
+
+RMVNNNLINE PROC 
+    
+    MOV BX,NNNXLINE
+    MOV NNNX1LINE,BX
+    MOV NNNX2LINE,BX
+    ADD NNNX1LINE,55
+               
+    MOV NNNXLINE,BX
+    MOV BX,NNNY2LINE
+    MOV NNNYLINE,BX
+
+NNNLINE1:
+    MOV AH,0CH
+    MOV AL,0
+    MOV CX,NNNXLINE
+    MOV DX,NNNYLINE
+    INT 10H
+    INC NNNXLINE
+    MOV BX,NNNX1LINE
+    CMP NNNXLINE,BX
+    JLE NNNLINE1 
+    
+    MOV BX,NNNX2LINE
+    MOV NNNXLINE,BX
+    DEC NNNYLINE
+    MOV BX,NNNY1LINE
+    CMP NNNYLINE,BX
+    JNE NNNLINE1
+    
+    MOV BX,NNNX2LINE
+    MOV NNNXLINE,BX
+    MOV BX,NNNY2LINE
+    MOV NNNYLINE,BX 
+           
+    RET
+           
+RMVNNNLINE ENDP   
+  
+GENERATE_RANDOM_NUMBER PROC
+    
+  PUSHALL MACRO
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+  ENDM
+
+  POPALL MACRO
+    POP DX 
+    POP CX
+    POP BX
+    POP AX
+  ENDM
+    
+  GETRAND MACRO CUR 
+    
+    PUSHALL
+    MOV AH,0
+    INT 1AH
+    
+    MOV AX,DX ; CX HIGH PART OF CLOCK COUNT DX LOW PART OF CLOCKMCOUNT
+    MOV DX,CX ; dx:ax contains system time
+    
+    MOV BX,7261
+    MUL AX
+    ADD AX,1
+    MOV DX,0
+    MOV BX,200
+    DIV BX
+    
+    MOV CUR,DX   ; REMAINDER
+    POPALL
+  
+  ENDM   
+    
+    MOV CX,0
+    GETRAND RANDNUMBER
+    
+    RET    
+        
+GENERATE_RANDOM_NUMBER ENDP     
+
+
+NEXT_XLINE PROC
+          
+    CMP YLINE,18
+    JGE NOCHANGE
+    MOV YLINE,196
+    MOV Y2LINE,196 
+    
+    MOV BX,RANDNUMBER
+    MOV XLINE,BX
+    MOV X1LINE,BX 
+    
+    NOCHANGE:
+    RET
+    
+NEXT_XLINE ENDP 
+
+NEXT_NXLINE PROC
+          
+    CMP NYLINE,18
+    JGE NNOCHANGE
+    MOV NYLINE,196
+    MOV NY2LINE,196 
+    
+    MOV BX,RANDNUMBER
+    MOV NXLINE,BX
+    MOV NX1LINE,BX 
+    
+    NNOCHANGE:
+    RET
+NEXT_NXLINE ENDP 
+
+NEXT_NNXLINE PROC
+          
+    CMP NNYLINE,18
+    JGE NNNOCHANGE
+    MOV NNYLINE,196
+    MOV NNY2LINE,196 
+    
+    MOV BX,RANDNUMBER
+    MOV NNXLINE,BX
+    MOV NNX1LINE,BX 
+    
+    NNNOCHANGE:
+    RET 
+    
+NEXT_NNXLINE ENDP    
+
+NEXT_NNNXLINE PROC
+          
+    CMP NNNYLINE,18
+    JGE NNNNOCHANGE
+    MOV NNNYLINE,196
+    MOV NNNY2LINE,196 
+    
+    MOV BX,RANDNUMBER
+    MOV NNNXLINE,BX
+    MOV NNNX1LINE,BX 
+    
+    NNNNOCHANGE:
+    RET 
+    
+NEXT_NNNXLINE ENDP 
+
+BORDER PROC
+    
+    BOR:
+    MOV AH,0CH
+    MOV AL,6
+    MOV CX,BORDERX
+    MOV DX,BORDERY
+    INT 10H
+    INC BORDERX
+    CMP BORDERX,318
+    JE NNP
+    JMP BOR
+    
+    NNP:
+    MOV BORDERX,1
+    MOV BORDERY,198
+    BOR1:
+    MOV AH,0CH
+    MOV AL,6
+    MOV CX,BORDERX
+    MOV DX,BORDERY
+    INT 10H
+    INC BORDERX
+    CMP BORDERX,318
+    JE NNP1
+    JMP BOR1
+    
+    NNP1:
+    MOV BORDERX,1
+    MOV BORDERY,16
+    BOR2:
+    MOV AH,0CH
+    MOV AL,6
+    MOV CX,BORDERX
+    MOV DX,BORDERY
+    INT 10H
+    INC BORDERY
+    CMP BORDERY,198
+    JE NNP2
+    JMP BOR2
+    
+    NNP2:
+    MOV BORDERX,318
+    MOV BORDERY,16
+    BOR3:
+    MOV AH,0CH
+    MOV AL,6
+    MOV CX,BORDERX
+    MOV DX,BORDERY
+    INT 10H
+    INC BORDERY
+    CMP BORDERY,198
+    JG DADA
+    JMP BOR3
+    
+    DADA:
+    MOV BORDERX,1
+    MOV BORDERY,16
+    RET 
+    
+BORDER ENDP 
+
+MAIN_MENU PROC
+   
+  MPR:
+    
+    MOV AH,9
+    LEA DX,MSG
+    INT 21H
+    LEA DX,MSG1
+    INT 21H
+    LEA DX,MSG2
+    INT 21H
+    LEA DX,MSG3
+    INT 21H
+    LEA DX,MSG4
+    INT 21H
+    LEA DX,MSG5
+    INT 21H
+    
+  LL1:
+    
+    ;DIRECT CHAR INPUT
+    MOV AH,7
+    INT 21H
+    CMP AL,'1'
+    JE  STG
+    CMP AL,'2'
+    JE  INSTRUC
+    CMP AL,'3'
+    JE  EXIT1
+    JMP LL1
+    
+  INSTRUC:
+    
+    CALL RESET_THE_SCREEN
+    
+    MOV AH,9
+    LEA DX,IMSG1
+    INT 21H
+    
+    MOV AH,1
+    INT 21H
+    
+    CALL RESET_THE_SCREEN
+     
+    JMP MPR
+    
+  STG: 
+  
+    CALL RESET_THE_SCREEN
+    MOV AH,9
+    LEA DX,MSG10
+    INT 21H  
+    MOV AH,9 
+    LEA DX,MSG9
+    INT 21H  
+    
+    JMP GAME    
+    
+  EXIT1:
+    
+    ;SET 80 X 25 16 COLOR TEXT          
+    MOV AH,0
+    MOV AL,2
+    INT 10H
+       
+    MOV AH,4CH
+    INT 21H
+
+  RET
+
+MAIN_MENU ENDP 
+
+
+RESET_THE_SCREEN PROC
+   
+    MOV AH,0
+    MOV AL,2
+    INT 10H
+    MOV AX,13H
+    INT 10H
+    
+    RET
+
+RESET_THE_SCREEN ENDP  
+   
+
+OUTDEC PROC   
+  
+   PUSH BX                        ; push BX onto the STACK
+   PUSH CX                       
+   PUSH DX                        
+
+   XOR CX, CX                     ; clear CX
+   MOV BX, 10                     
+
+ OUTPUT:                       
+    
+     XOR DX, DX                   ; clear DX
+     DIV BX                       ; divide AX by BX
+     PUSH DX                     
+     INC CX                       
+     OR AX, AX                    
+    
+   JNE OUTPUT                     ; jump to label OUTPUT if ZF=0
+
+     MOV AH, 2                     
+
+ DISP:                      
+    
+     POP DX                       ; pop a value from STACK to DX
+     OR DL, 30H                   ; convert decimal to ascii code
+     INT 21H                     
+  
+   LOOP DISP                   ; jump to label DISPLAY if CX!=0
+
+    POP DX                        ; pop a value from STACK into DX
+    POP CX                         
+    POP BX 
+                          
+    RET                            
+ 
+OUTDEC ENDP      
+
+OUTDECGPS PROC   
+  
+   PUSH BX                        ; push BX onto the STACK
+   PUSH CX                       
+   PUSH DX                        
+
+   XOR CX, CX                     ; clear CX
+   MOV BX, 10                     
+
+ OUTPUTGP:                       
+    
+     XOR DX, DX                   ; clear DX
+     DIV BX                       ; divide AX by BX
+     PUSH DX                     
+     INC CX                       
+     OR AX, AX                    
+    
+   JNE OUTPUTGP                     ; jump to label OUTPUT if ZF=0
+
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,39
+     INT 10H
+     MOV AH,9                     
+
+ DISPGP:                      
+    
+     POP DX                       ; pop a value from STACK to DX
+     OR DL, 30H                   ; convert decimal to ascii code 
+     MOV AL,DL
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+  
+   LOOP DISPGP                   ; jump to label DISPLAY if CX!=0
+
+    POP DX                        ; pop a value from STACK into DX
+    POP CX                         
+    POP BX 
+                          
+    RET                            
+ 
+OUTDECGPS ENDP           
+
+OUTDECGPS1 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'1'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS1 ENDP    
+
+OUTDECGPS2 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'2'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS2 ENDP  
+
+OUTDECGPS3 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'3'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS3 ENDP  
+
+OUTDECGPS4 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'4'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS4 ENDP   
+
+OUTDECGPS5 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'5'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS5 ENDP 
+
+OUTDECGPS6 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'6'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS6 ENDP 
+
+OUTDECGPS7 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'7'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS7 ENDP 
+
+OUTDECGPS8 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'8'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS8 ENDP 
+
+OUTDECGPS9 PROC   
+  
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,38
+     INT 10H
+     MOV AH,9                     
+
+     MOV AL,'9'
+     MOV BL,2
+     MOV CX,1
+     INT 10H                     
+                     
+    RET                            
+ 
+OUTDECGPS9 ENDP 
+
+OUTDECGPC PROC   
+                
+   
+   PUSH BX                        ; push BX onto the STACK
+   PUSH CX                       
+   PUSH DX                        
+
+   XOR CX, CX                     ; clear CX
+   MOV BX, 10                     
+
+ OUTPUTGP1:                       
+    
+     XOR DX, DX                   ; clear DX
+     DIV BX                       ; divide AX by BX
+     PUSH DX                     
+     INC CX                       
+     OR AX, AX                    
+    
+   JNE OUTPUTGP1                     ; jump to label OUTPUT if ZF=0
+
+     MOV AH, 0BH
+     INT 10H
+     MOV AH,02
+     MOV BH,0
+     MOV DH,1
+     MOV DL,16
+     INT 10H
+     MOV AH,9                     
+
+ DISPGP1:                      
+    
+     POP DX                       ; pop a value from STACK to DX
+     OR DL, 30H                   ; convert decimal to ascii code 
+     MOV AL,DL
+     MOV BL,14
+     MOV CX,1
+     INT 10H                     
+  
+   LOOP DISPGP1                   ; jump to label DISPLAY if CX!=0
+
+    POP DX                        ; pop a value from STACK into DX
+    POP CX                         
+    POP BX 
+                          
+    RET                                                
+ 
+OUTDECGPC ENDP
+
+GAME_OVER PROC
+    
+    
+   
+    MOV DI,0
+    ;MOV BX,COUNT1
+    ;MOV COUNT,BX
+    GLO:
+    
+    DEC COUNT
+    CMP COUNT,0
+    JE  GLO1
+     
+   ; CALL RESET_THE_SCREEN 
+   ; CALL PLAY_AGAIN_2
+    
+   ; MOV AH,9
+   ; LEA DX,MSG10
+   ; INT 21H 
+    CALL RESET_THE_SCREEN
+    MOV AH,9
+    LEA DX,MSG10
+    INT 21H  
+    MOV AH,9 
+    LEA DX,MSG9
+    INT 21H 
+    
+    MOV AX,COUNT
+    CALL OUTDECGPC 
+    
+    XOR AX,AX
+    XOR BX,BX
+    XOR CX,CX
+    XOR DX,DX
+    
+    MOV AX,SCORE
+    CALL OUTDECGPS 
+    CALL PLAY_AGAIN_2
+    JMP GAME
+    
+   GLO1:
+    CALL RESET_THE_SCREEN 
+    
+    MOV AH,9
+    LEA DX,GAMEOVERMSG
+    INT 21H    
+    
+    MOV AX,SCORE
+    CALL OUTDEC  
+    
+    MOV AH,9  
+    LEA DX,HIGHESTMSG2
+    INT 21H  
+    
+    MOV AX,SCORE
+    CMP AX,HIGHSCORE
+    JG  HSCORE  
+    JMP NHSCORE
+    
+ HSCORE: 
+    
+    MOV AX,SCORE
+    MOV HIGHSCORE,AX
+    CALL OUTDEC 
+    JMP FNSH 
+    
+ NHSCORE:
+    
+    MOV AX,HIGHSCORE
+    CALL OUTDEC
+    JMP FNSH 
+    
+ FNSH:
+    MOV AH,9
+    LEA DX,GAMEOVERMSG1
+    INT 21H   
+    
+    LEA DX,GAMEOVERMSG3
+    INT 21H 
+    
+    MOV BX,SCORE1
+    MOV SCORE,BX
+    
+    AGA:
+    ;DIRECT CHARACTER INPUT WITHOUT ECHO
+    MOV AH,7
+    INT 21H
+    CMP AL,'X'
+    JE GGG
+    CMP AL,'x'
+    JE GGG
+    CMP AL,'P'
+    JE DIDA 
+    CMP AL,'p'
+    JE DIDA
+    JMP AGA
+    
+    DIDA:
+    MOV BX,COUNT1
+    MOV COUNT,BX 
+    
+    CALL RESET_THE_SCREEN   
+    MOV AH,9
+    LEA DX,MSG10
+    INT 21H  
+    MOV AH,9 
+    LEA DX,MSG9
+    INT 21H  
+    CALL PLAY_AGAIN
+    JMP GAME
+    
+    GGG:
+     RET  
+     
+GAME_OVER ENDP   
+
+HIGHEST PROC
+    
+    CALL RESET_THE_SCREEN 
+    
+    MOV AH,9
+    LEA DX,GAMEOVERMSG
+    INT 21H    
+    
+    MOV AX,SCORE
+    CALL OUTDEC 
+    
+    MOV AH,9
+    LEA DX,GAMEOVERMSG1
+    INT 21H 
+    
+    MOV BX,SCORE1
+    MOV SCORE,BX  
+    
+    MOV AH,9
+    LEA DX,HIGHESTMSG
+    INT 21H    
+    
+    LEA DX,GAMEOVERMSG3
+    INT 21H 
+    
+    AGAH:
+    ;DIRECT CHARACTER INPUT WITHOUT ECHO
+    MOV AH,7
+    INT 21H
+    CMP AL,'X'
+    JE GGGH
+    CMP AL,'x'
+    JE GGGH
+    CMP AL,'P'
+    JE DIDAH 
+    CMP AL,'p'
+    JE DIDAH
+    JMP AGAH
+    
+    DIDAH:
+    MOV BX,COUNT1
+    MOV COUNT,BX 
+    
+    CALL RESET_THE_SCREEN   
+    MOV AH,9
+    LEA DX,MSG10
+    INT 21H  
+    MOV AH,9 
+    LEA DX,MSG9
+    INT 21H  
+    CALL PLAY_AGAIN
+    JMP GAME
+    
+    GGGH:
+     RET  
+     
+HIGHEST ENDP  
+
+FINAL_EX PROC
+    MOV AH,0
+    MOV AL,2
+    INT 10H
+       
+    MOV AH,4CH
+    INT 21H
+FINAL_EX ENDP
+
+ MAIN PROC
+   
+    MOV AX,@DATA
+    MOV DS,AX 
+    
+    ;SET GRAPHICS MODE 320 X 200 256 COLOR
+    MOV AX,13H
+    INT 10H
+    CALL MAIN_MENU   
+    
+    MOV BX,COUNT1
+    MOV COUNT,BX   
+    
+  GAME:
+    
+    ;Checks to see if a character is available in the buffer
+    MOV AH,1
+    INT 16H
+    
+     JZ NOKEYPRESS  ;JUMP IF FLAG IS ZERO
+    JNZ KEYPRESS
+    
+  NOKEYPRESS:
+  
+    CALL NEXT_XLINE
+    CALL NEXT_NXLINE
+    CALL NEXT_NNXLINE  
+    CALL NEXT_NNNXLINE 
+    CALL GENERATE_RANDOM_NUMBER
+    
+    CALL BORDER 
+    
+    CALL UPDRAWCUBE
+   
+    CALL DRAWLINE
+    CALL DRAWNLINE
+    CALL DRAWNNLINE  
+    CALL DRAWNNNLINE
+    
+    MOV  BX,SCORE
+    CMP  BX,80 
+    JG   DLA5 
+    CMP  BX,60
+    JG   DLA4 
+    CMP  BX,40
+    JG   DLA3 
+    CMP  BX,20
+    JG   DLA2 
+    CMP  BX,0
+    JGE  DLA
+  
+  DLA5: 
+    CALL DELAY5
+    JMP  NXT  
+    
+  DLA4: 
+    CALL DELAY4
+    JMP  NXT 
+    
+  DLA3: 
+    CALL DELAY3
+    JMP  NXT  
+    
+  DLA2: 
+    CALL DELAY2
+    JMP  NXT
+  
+  DLA: 
+    CALL DELAY
+    JMP  NXT  
+   
+   
+  NXT:
+    
+    CALL UPRMVCUBE
+               
+    CALL RMVLINE
+    CALL RMVNLINE
+    CALL RMVNNLINE    
+    CALL RMVNNNLINE
+     JMP AGAIN 
+   
+  KEYPRESS:  
+   
+    MOV AH,0
+    INT 16H 
+    CMP AL,'E'
+    JE  EXIT2
+    CMP AL,'e'
+    JE  EXIT2
+    CMP AL,'A'
+    JE MOVELEFT
+    CMP AL,'a'
+    JE MOVELEFT
+    CMP AL,'D'
+    JE MOVERIGHT
+    CMP AL,'d'
+    JE MOVERIGHT
+    JMP AGAIN  
+       
+  MOVELEFT: 
+    MOV BX,XCUBE
+    CMP BX,4
+    JL  AGAIN
+    SUB XCUBE,2
+    SUB X2CUBE,2
+    JMP AGAIN 
+     
+  MOVERIGHT:  
+    MOV BX,XCUBE 
+    ADD BX,7
+    CMP BX,315
+    JG  AGAIN
+    ADD XCUBE,2
+    ADD X2CUBE,2 
+    JMP AGAIN
+    
+  EXIT2: 
+  
+    CALL RESET_THE_SCREEN
+    MOV AH,9
+    LEA DX,GAMEOVERMSG2
+    INT 21H       
+    LEA DX,GAMEOVERMSG1
+    INT 21H    
+    LEA DX,GAMEOVERMSG3
+    INT 21H 
+    JMP AGA2
+    
+  AGAIN:  
+  
+    CALL CHECK_UP_OR_DOWN
+    CALL NCHECK_UP_OR_DOWN
+    CALL NNCHECK_UP_OR_DOWN 
+    CALL NNNCHECK_UP_OR_DOWN
+    
+    CMP CHECK_UND,1
+    JE AGAIN1
+    CMP NCHECK_UND,1
+    JE AGAIN1
+    CMP NNCHECK_UND,1
+    JE AGAIN1
+    CMP NNNCHECK_UND,1
+    JE AGAIN1  
+    JMP AGAIN3
+    
+   AGAIN1: 
+    CMP CHECK_UND,1
+    JE  LIFEDEC 
+    
+    CMP NNNCHECK_UND,1
+    JE  LIFEINC   
+    JMP LIFEADJ 
+    
+   LIFEINC: 
+   
+     MOV BX,Y  
+     CMP BX,1
+     JE  YES2
+     JMP LIFEADJ
+     
+   YES2:
+     
+     MOV BX,0
+     MOV Y,BX
+     INC COUNT 
+     
+     CMP COUNT,9
+     JG  CNTG
+     JMP CNTL
+   
+   CNTG:
+    MOV COUNT,9
+    
+   
+   CNTL:
+    MOV AX,COUNT
+    CALL OUTDECGPC 
+    
+    JMP LIFEADJ
+    
+   LIFEDEC:
+    
+    MOV BX,X
+    CMP BX,1  
+    JE  YES 
+    JMP LIFEADJ
+    
+   YES: 
+    
+    MOV BX,0    
+    MOV X,BX
+    DEC COUNT
+    
+    MOV AX,COUNT
+    CALL OUTDECGPC 
+    
+    CMP COUNT,0
+    JE  DEAD
+    JMP ALIVE
+   
+   DEAD: 
+    CALL RESET_THE_SCREEN 
+    
+    MOV AH,9
+    LEA DX,GAMEOVERMSG
+    INT 21H    
+    
+    MOV AX,SCORE
+    CALL OUTDEC 
+    
+    MOV AH,9  
+    LEA DX,HIGHESTMSG2
+    INT 21H  
+    
+    MOV AX,SCORE
+    CMP AX,HIGHSCORE
+    JG  HSCORE1  
+    JMP NHSCORE1
+    
+ HSCORE1: 
+    
+    MOV AX,SCORE
+    MOV HIGHSCORE,AX
+    CALL OUTDEC 
+    JMP FNSH1 
+    
+ NHSCORE1:
+    
+    MOV AX,HIGHSCORE
+    CALL OUTDEC
+    JMP FNSH1 
+    
+ FNSH1:
+    
+    MOV AH,9
+    LEA DX,GAMEOVERMSG1
+    INT 21H   
+    
+    LEA DX,GAMEOVERMSG3
+    INT 21H 
+    
+    MOV BX,SCORE1
+    MOV SCORE,BX
+    
+    AGAD:
+    ;DIRECT CHARACTER INPUT WITHOUT ECHO
+    MOV AH,7
+    INT 21H
+    CMP AL,'P'
+    JE DIDAD 
+    CMP AL,'p'
+    JE DIDAD 
+    CMP AL,'X'
+    JE  FEX
+    CMP AL,'x'
+    JE  FEX
+    JMP AGAD   
+    
+    FEX:
+    CALL FINAL_EX
+    
+    DIDAD:
+    MOV BX,COUNT1
+    MOV COUNT,BX 
+    
+    CALL RESET_THE_SCREEN   
+    MOV AH,9
+    LEA DX,MSG10
+    INT 21H  
+    MOV AH,9 
+    LEA DX,MSG9
+    INT 21H  
+    CALL PLAY_AGAIN
+    JMP GAME
+     
+   ALIVE: 
+    JMP LIFEADJ  
+    
+   LIFEADJ:
+     DEC YCUBE
+     JMP AGAIN2
+     
+    
+    
+  AGAIN3:
+   
+    LIFEADJX: 
+   
+    MOV BX,YLINE
+    CMP YCUBE,BX
+    JE  XNEW 
+    DEC BX     
+    CMP YCUBE,BX
+    JE  XNEW 
+    JMP LIFEADJY
+  
+   XNEW:
+    MOV BX,1
+    MOV X,BX  
+    
+    
+   LIFEADJY: 
+   
+    MOV BX,NNNYLINE
+    CMP YCUBE,BX
+    JE  YNEW 
+    DEC BX     
+    CMP YCUBE,BX
+    JE  YNEW 
+    JMP FINAL
+  
+   YNEW:
+    MOV BX,1
+    MOV Y,BX    
+    
+  FINAL:  
+    MOV BX,YLINE
+    CMP YCUBE,BX
+    JE  SCOREL 
+    DEC BX     
+    CMP YCUBE,BX
+    JE  SCOREL 
+    MOV BX,NYLINE
+    CMP YCUBE,BX
+    JE  SCOREL 
+    DEC BX     
+    CMP YCUBE,BX
+    JE  SCOREL 
+    MOV BX,NNYLINE
+    CMP YCUBE,BX
+    JE  SCOREL 
+    DEC BX     
+    CMP YCUBE,BX
+    JE  SCOREL 
+    MOV BX,NNNYLINE
+    CMP YCUBE,BX
+    JE  SCOREL 
+    DEC BX     
+    CMP YCUBE,BX
+    JE  SCOREL 
+   
+    INC YCUBE   
+   ; CMP YCUBE,BX
+   ; JE  SCOREL  
+   
+    JMP AGAIN2
+ SCOREL: 
+    INC YCUBE
+    INC SCORE 
+    
+    ;CALL RESET_THE_SCREEN 
+     MOV AX,COUNT
+    CALL OUTDECGPC   
+   
+   ; MOV AH,9
+   ; LEA DX,MSG10
+   ; INT 21H 
+    CMP SCORE,10
+    JL  SC1 
+    
+    CMP SCORE,20
+    JL  SC2  
+    
+    CMP SCORE,30
+    JL  SC3 
+    
+    CMP SCORE,40
+    JL SC4
+    
+    CMP SCORE,50
+    JL SC5  
+    
+    CMP SCORE,60
+    JL SC6    
+    
+    CMP SCORE,70
+    JL SC7  
+    
+    CMP SCORE,80
+    JL SC8
+    
+    CMP SCORE,90
+    JL  SC9   
+    
+    CMP SCORE,100
+    JL  SC10
+    
+    CMP SCORE,100
+    JGE EXITH  
+    
+   EXITH:
+    CALL HIGHEST
+    
+   
+    
+   ; MOV AH,9
+   ; LEA DX,MSG9
+   ; INT 21H 
+   SC1: 
+    MOV AX,SCORE
+    JMP FJUMP
+   SC2:   
+    CALL OUTDECGPS1
+    MOV AX,SCORE
+    SUB AX,10    
+    JMP FJUMP 
+   SC3:
+    CALL OUTDECGPS2
+    MOV AX,SCORE
+    SUB AX,20    
+    JMP FJUMP
+      
+   SC4:   
+    CALL OUTDECGPS3
+    MOV AX,SCORE
+    SUB AX,30    
+    JMP FJUMP
+     
+   SC5:
+    CALL OUTDECGPS4
+    MOV AX,SCORE
+    SUB AX,40  
+    JMP FJUMP
+    
+   SC6:
+    CALL OUTDECGPS5
+    MOV AX,SCORE
+    SUB AX,50    
+    JMP FJUMP    
+    
+   SC7:
+    CALL OUTDECGPS6
+    MOV AX,SCORE
+    SUB AX,60    
+    JMP FJUMP  
+    
+   SC8:
+    CALL OUTDECGPS7
+    MOV AX,SCORE
+    SUB AX,70    
+    JMP FJUMP
+   
+   SC9:
+    CALL OUTDECGPS8
+    MOV AX,SCORE
+    SUB AX,80    
+    JMP FJUMP  
+    
+   SC10:
+    CALL OUTDECGPS9
+    MOV AX,SCORE
+    SUB AX,90    
+    JMP FJUMP 
+  
+  FJUMP:  
+    CALL OUTDECGPS
+    JMP AGAIN2
+    
+      
+    
+ AGAIN2:
+    DEC YLINE
+    DEC NYLINE
+    DEC NNYLINE 
+    DEC NNNYLINE  
+    
+    CMP YCUBE,198
+    JE EXIT
+    CMP YCUBE,25
+    JE EXIT
+    CMP YCUBE,26
+    JE EXIT
+    JMP GAME 
+
+  
+ AGA2:
+    ;DIRECT CHARACTER INPUT WITHOUT ECHO
+    MOV AH,7
+    INT 21H
+    CMP AL,'X'
+    JE  FINAL_EXIT
+    CMP AL,'x'
+    JE  FINAL_EXIT
+    CMP AL,'P'
+    JE  DIDA2 
+    CMP AL,'p'
+    JE  DIDA2
+    JMP AGA2
+DIDA2:
+    MOV BX,COUNT1
+    MOV COUNT,BX   
+    
+    MOV BX,SCORE1
+    MOV SCORE,BX
+   
+    CALL RESET_THE_SCREEN 
+    MOV AH,9
+    LEA DX,MSG10
+    INT 21H  
+    MOV AH,9 
+    LEA DX,MSG9
+    INT 21H  
+    CALL PLAY_AGAIN
+    JMP GAME
+    
+  EXIT:
+    CALL GAME_OVER  
+    JMP  FINAL_EXIT
+    
+   
+    
+  FINAL_EXIT:           
+   
+    MOV AH,0
+    MOV AL,2
+    INT 10H
+       
+    MOV AH,4CH
+    INT 21H
+    
+    MAIN ENDP
+
+END MAIN    
+
+
+
+;=============SNAKE GAME CODE=============
+
+
+
+
+%define VGA_MEM      0A000H                          ; video memory bank
+%define SCR_MEM      09000H                          ; last 64kB segment
+%define FONT_SEG     0F000H                          ; ROM-Font segment
+%define FONT_OFF     0FA6EH                          ; ROM-Font offset
+
+
+%define TRANSPARENT_COLOR 0
+
+
+%define KEY_ESC           1
+%define KEY_UP           72
+%define KEY_DOWN         80
+%define KEY_LEFT         75
+%define KEY_RIGHT        77
+%define KEY_A            30
+%define KEY_P            25
+
+
+        CPU 186
+        BITS 16
+
+
+        ORG 100H
+        JMP main
+
+
+; keyboard routines
+keyboard_int:
+        STI
+        PUSH AX
+        IN AL,60H                                    ; get key from keyboard port
+        MOV [CS:lastkey],AL
+        POP AX
+
+        PUSH AX
+        PUSH CX
+        MOV AX,0
+        MOV AL,[CS:lastkey]
+        CMP AL,128                                   ; check keyboard data (pressed or not)
+        JNAE check_keys_1
+        SUB AL,128
+        MOV CL,0
+        JMP check_keys_2
+check_keys_1:
+        MOV CL,1
+check_keys_2:
+        MOV BX,key
+        ADD BX,AX
+        MOV [CS:BX],CL
+        POP CX
+        POP AX
+
+        PUSH AX
+        MOV AL,20H                                   ; send end of irq
+        OUT 20H,AL
+        POP AX
+
+        CLI
+        IRET
+
+install_keyboard:
+        MOV AX,3509H                                 ; get old keyboard int proc
+        INT 21H
+        MOV [CS:old_keyboard_int],BX
+        MOV [CS:old_keyboard_int + 2],ES
+        MOV AX,2509H                                 ; set new keyboard int proc
+        MOV DX,keyboard_int
+        PUSH DS
+        PUSH CS
+        POP DS
+        INT 21H
+        POP DS
+        RET
+
+remove_keyboard:
+        MOV AX,2509H                                 ; restore old keyboard proc
+        LDS DX,[CS:old_keyboard_int]
+        INT 21H
+        RET
+
+
+wait_for_any_key:
+        MOV BYTE [lastkey],0
+        MOV DL,[lastkey]
+wait_for_any_key_1:
+        CMP DL,[lastkey]
+        JE wait_for_any_key
+        RET
+;-------
+
+
+; timer routines
+timer_int:
+        STI
+        MOV BYTE [CS:can_update],1                   ; update game
+        INC BYTE [CS:timer_counter]
+        CMP BYTE [CS:timer_counter],18
+        JE timer_int_reset_delay
+        JMP timer_int_end
+timer_int_reset_delay:
+        MOV BYTE [CS:timer_delay],0
+        MOV BYTE [CS:timer_counter],0
+timer_int_end:
+        CLI
+        IRET
+
+
+install_timer:
+        MOV AX,351CH                                 ; get old timer int proc
+        INT 21H
+        MOV [CS:old_timer_int],BX
+        MOV [CS:old_timer_int + 2],ES
+        MOV AX,251CH                                 ; set new timer int proc
+        MOV DX,timer_int
+        PUSH DS
+        PUSH CS
+        POP DS
+        INT 21H
+        POP DS
+        RET
+
+
+remove_timer:
+        MOV AX,251CH                                 ; restore old timer proc
+        LDS DX,[CS:old_timer_int]
+        INT 21H
+        RET
+;-------
+
+
+; gfx routines
+init13h:
+        MOV AX,0013H                                   ; set 320x200 8bit video mode
+        INT 10H
+        RET
+
+
+close13h:
+        MOV AX,0003H                                   ; restore text mode
+        INT 10H
+        RET
+
+
+vsync:                                               ; wait for end of screen updating
+        PUSH AX
+        PUSH DX
+        MOV DX,03DAH
+vsync_1:
+        IN AL,DX
+        TEST AL,0
+        JNE vsync_1
+        POP DX
+        POP AX
+        RET
+
+
+set_palette:
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        MOV AX,0
+        MOV BX,palette                               ; load palette adress to BX
+        MOV CX,256                                   ; 256 colors (8bit)
+set_palette_1:
+        PUSH AX
+        MOV DX,03C8H                                 ; set first VGA DAC port
+        OUT DX,AL                                    ; send color num (AL) to VGA DAC
+        INC DX                                       ; set next port
+        MOV AL,[BX]                                  ; send RGB and increment BX pointer
+        OUT DX,AL
+        INC BX
+        MOV AL,[BX]
+        OUT DX,AL
+        INC BX
+        MOV AL,[BX]
+        OUT DX,AL
+        INC BX
+        POP AX
+        INC AL                                       ; increment color num
+        LOOP set_palette_1
+        POP DX
+        POP BX
+        POP CX
+        POP AX
+        RET
+
+
+draw_screen:                                         ; move data from 9000h to A000h segment
+        CALL vsync
+        PUSH DS
+        PUSH ES
+        PUSH AX
+        PUSH CX
+        PUSH DI
+        MOV AX,SCR_MEM
+        MOV DS,AX
+        MOV AX,VGA_MEM
+        MOV ES,AX
+        MOV CX,64000
+draw_screen_1:
+        MOV DI,CX
+        DEC DI
+        MOV AL,[DS:DI]
+        MOV [ES:DI],AL
+        LOOP draw_screen_1
+        POP DI
+        POP CX
+        POP AX
+        POP ES
+        POP DS
+        RET
+
+
+clear_screen:                                        ; clear screen buffer, CL - color
+        PUSH ES
+        PUSH AX
+        PUSH DI
+        MOV AX,SCR_MEM
+        MOV ES,AX
+        MOV AL,CL
+        MOV CX,64000
+clear_screen_1:
+        MOV DI,CX
+        DEC DI
+        MOV [ES:DI],AL
+        LOOP clear_screen_1
+        POP DI
+        POP AX
+        POP ES
+        RET
+
+
+putpixel:                                            ; AX - x, BX - y, CL - color
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DI
+        PUSH ES
+        PUSH AX
+        MOV AX,BX
+        MOV BX,320
+        MUL BX
+        POP BX
+        ADD AX,BX
+        MOV DI,AX
+        MOV AX,SCR_MEM
+        MOV ES,AX
+        MOV [ES:DI],CL
+        POP ES
+        POP DI
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+getpixel:                                            ; AX - x, BX - y, return: CL - color
+        PUSH AX
+        PUSH BX
+        PUSH DI
+        PUSH ES
+        PUSH AX
+        MOV AX,BX
+        MOV BX,320
+        MUL BX
+        POP BX
+        ADD AX,BX
+        MOV DI,AX
+        MOV AX,SCR_MEM
+        MOV ES,AX
+        MOV CL,[ES:DI]
+        POP ES
+        POP DI
+        POP BX
+        POP AX
+        RET
+
+
+draw_sprite:                                         ; SX - x, SY - y, SW - width, SH - height, BX - data
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        PUSH ES
+        PUSH DI
+        MOV AX,SCR_MEM
+        MOV ES,AX
+        MOV AX,[SY]
+        MOV CX,[SH]
+draw_sprite_y_axis:
+        PUSH CX
+        PUSH AX
+        MOV DX,320
+        MUL DX
+        ADD AX,[SX]
+        MOV DI,AX
+        MOV CX,[SW]
+draw_sprite_x_axis:
+        MOV AL,[BX]
+        MOV [ES:DI],AL
+        INC DI
+        INC BX
+        LOOP draw_sprite_x_axis
+        POP AX
+        INC AX
+        POP CX
+        LOOP draw_sprite_y_axis
+        POP DI
+        POP ES
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+draw_transparent_sprite:                                         ; SX - x, SY - y, SW - width, SH - height, BX - data
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        PUSH ES
+        PUSH DI
+        MOV AX,SCR_MEM
+        MOV ES,AX
+        MOV AX,[SY]
+        MOV CX,[SH]
+draw_transparent_sprite_y_axis:
+        PUSH CX
+        PUSH AX
+        MOV DX,320
+        MUL DX
+        ADD AX,[SX]
+        MOV DI,AX
+        MOV CX,[SW]
+draw_transparent_sprite_x_axis:
+        MOV AL,[BX]
+        CMP AL,TRANSPARENT_COLOR
+        JE draw_transparent_sprite_x_next
+        MOV [ES:DI],AL
+draw_transparent_sprite_x_next
+        INC DI
+        INC BX
+        LOOP draw_transparent_sprite_x_axis
+        POP AX
+        INC AX
+        POP CX
+        LOOP draw_transparent_sprite_y_axis
+        POP DI
+        POP ES
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+hline:                                               ; PX1 - x1, PY1 - y, PX2 - x2, PCL - color
+        PUSH ES
+        PUSH DI
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        MOV AX,SCR_MEM
+        MOV ES,AX
+        MOV AX,[PY1]
+        MOV BX,320
+        MUL BX
+        ADD AX,[PX1]
+        MOV DI,AX
+        MOV AL,[PCL]
+        MOV CX,[PX2]
+        SUB CX,[PX1]
+hline_1:
+        MOV BYTE [ES:DI],AL
+        INC DI
+        LOOP hline_1
+        POP CX
+        POP BX
+        POP AX
+        POP DI
+        POP ES
+        RET
+
+
+vline:                                               ; PX1 - x, PY1 - y1, PY2 - y2, PCL - color
+        PUSH ES
+        PUSH DI
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        MOV AX,SCR_MEM
+        MOV ES,AX
+        MOV AX,[PY1]
+        MOV BX,320
+        MUL BX
+        ADD AX,[PX1]
+        MOV DI,AX
+        MOV AL,[PCL]
+        MOV CX,[PY2]
+        SUB CX,[PY1]
+vline_1:
+        MOV [ES:DI],AL
+        ADD DI,320
+        LOOP vline_1
+        POP CX
+        POP BX
+        POP AX
+        POP DI
+        POP ES
+        RET
+
+
+rect:                                                ; PX1 - x1, PY1 - y1, PX2 - x2, PY2 - y2, PCL - color
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        CALL hline
+        CALL vline
+        MOV AX,[PY1]
+        MOV BX,[PY2]
+        MOV [PY1],BX
+        CALL hline
+        MOV [PY1],AX
+        MOV AX,[PX1]
+        MOV BX,[PX2]
+        MOV [PX1],BX
+        CALL vline
+        MOV [PX1],AX
+        MOV AX,[PX2]
+        MOV BX,[PY2]
+        MOV CL,[PCL]
+        CALL putpixel
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+rectfill:
+        PUSH AX
+        PUSH CX
+        MOV AX,[PY1]
+        MOV CX,[PY2]
+        SUB CX,[PY1]
+rectfill_1:
+        CALL hline
+        INC WORD [PY1]
+        LOOP rectfill_1
+        MOV [PY1],AX
+        CALL rect
+        POP CX
+        POP AX
+        RET
+
+
+draw_char_mask:                                      ; AX - x, BX - y, CL - color, CH - char mask
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        MOV DX,CX
+        MOV CX,8
+draw_char_mask_1:
+        PUSH CX
+        SHL DH,1
+        JNC draw_char_mask_2
+        PUSH DX
+        MOV CL,DL
+        CALL putpixel
+        POP DX
+draw_char_mask_2:
+        POP CX
+        INC AX
+        LOOP draw_char_mask_1
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+draw_char:                                           ; AX - x, BX - y, CL - color, CH - char
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        PUSH ES
+        PUSH DI
+        PUSH AX
+        MOV AX,FONT_SEG
+        MOV ES,AX
+        MOV AX,FONT_OFF
+        MOV DI,AX
+        MOV AX,0
+        MOV AL,CH
+        SHL AX,3
+        ADD DI,AX
+        POP AX
+        MOV DX,CX
+        MOV CX,8
+draw_char_1:
+        PUSH CX
+        MOV CX,DX
+        MOV CH,[ES:DI]
+        CALL draw_char_mask
+        INC DI
+        INC BX
+        POP CX
+        LOOP draw_char_1
+        POP DI
+        POP ES
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+draw_integer:                                        ; AX - x, BX - y, CL - color, DX - integer
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        PUSH DI
+        MOV DI,10000
+        MOV [draw_integer_cl],CL
+        MOV CX,5
+draw_integer_1:
+        PUSH CX
+        PUSH AX
+        PUSH BX
+        PUSH DX
+        MOV AX,DX
+        XOR DX,DX
+        MOV BX,DI
+        DIV BX
+        MOV CH,AL
+        MUL BX
+        POP DX
+        SUB DX,AX
+        POP BX
+        POP AX
+        ADD CH,'0'
+        MOV CL,[draw_integer_cl]
+        CALL draw_char
+        ADD AX,8
+        PUSH AX
+        PUSH BX
+        PUSH DX
+        MOV AX,DI
+        MOV BX,10
+        XOR DX,DX
+        DIV BX
+        MOV DI,AX
+        POP DX
+        POP BX
+        POP AX
+        POP CX
+        LOOP draw_integer_1
+        POP DI
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+draw_integer_cl                           DB 0          ; color (temp)
+
+
+draw_text:                                           ; AX - x, BX - y, CL - color, DX - data
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        XCHG BX,DX
+draw_text_1:
+        MOV CH,[BX]
+        INC BX
+        XCHG BX,DX
+        CALL draw_char
+        ADD AX,8
+        XCHG BX,DX
+        CMP BYTE [BX],0
+        JNE draw_text_1
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+;-------
+
+
+; program code
+random_init:
+        PUSH AX
+        PUSH CX
+        PUSH DX
+        MOV AH,2CH
+        INT 21H
+        MOV [random_seed],DX
+        POP DX
+        POP CX
+        POP AX
+        RET
+
+
+random_gen:                                          ; return: CL - random byte
+        MOV CX,[random_seed]
+        IMUL CX,13A7H
+        INC CX
+        MOV [random_seed],CX
+        MOV CL,CH
+        MOV CH,0
+        RET
+
+
+random:                                              ; AL - max random number
+        CALL random_gen
+        CMP CL,AL
+        JAE random
+        RET
+
+
+random_seed                            DW 0          ; seed
+
+
+delay:                                               ; AX - hund. seconds (1/100 s)
+        MOV BYTE [timer_delay],1
+delay_1:
+        CMP BYTE [timer_delay],0
+        JNE delay_1
+        RET
+
+
+sound_on:
+        PUSH AX
+        MOV AL,0B6H
+        OUT 43H,AL
+        MOV AX,11930
+        OUT 42H,AL
+        MOV AL,AH
+        OUT 42H,AL
+        IN AL,61H
+        OR AL,3
+        OUT 61H,AL
+        POP AX
+        RET
+
+
+sound_off:
+        PUSH AX
+        IN AL,61H
+        AND AL,252
+        OUT 61H,AL
+        POP AX
+        RET
+
+
+move_snake:
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        CMP BYTE [snake_vector],0
+        JE move_snake_end
+        MOV CX,[snake_len]
+        DEC CX
+move_snake_1:
+        PUSH CX
+        DEC CX
+        MOV BX,snake
+        MOV AX,CX
+        MOV CX,4
+        MUL CX
+        ADD BX,AX
+        MOV AX,[BX]
+        MOV CX,[BX + 2]
+        MOV [BX + 4],AX
+        MOV [BX + 6],CX
+        POP CX
+        LOOP move_snake_1
+        CMP BYTE [snake_vector],1
+        JE move_snake_up
+        CMP BYTE [snake_vector],2
+        JE move_snake_down
+        CMP BYTE [snake_vector],3
+        JE move_snake_left
+        CMP BYTE [snake_vector],4
+        JE move_snake_right
+move_snake_up:
+        SUB WORD [snake + 2],5
+        JMP move_snake_vector_end
+move_snake_down:
+        ADD WORD [snake + 2],5
+        JMP move_snake_vector_end
+move_snake_left:
+        SUB WORD [snake],5
+        JMP move_snake_vector_end
+move_snake_right:
+        ADD WORD [snake],5
+        JMP move_snake_vector_end
+move_snake_vector_end:
+move_snake_end:
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+set_snakes_vector:
+        PUSH AX
+
+        CMP AL,1
+        JE set_snakes_vector_up
+        CMP AL,2
+        JE set_snakes_vector_down
+        CMP AL,3
+        JE set_snakes_vector_left
+        CMP AL,4
+        JE set_snakes_vector_right
+        JMP set_snakes_vector_end
+
+set_snakes_vector_up:
+        CMP BYTE [snake_vector],2                    ; if not down
+        JE set_snakes_vector_up_1
+        MOV BYTE [snake_vector],1                    ; set up
+set_snakes_vector_up_1:
+        JMP set_snakes_vector_end
+
+set_snakes_vector_down:
+        CMP BYTE [snake_vector],1                    ; if not up
+        JE set_snakes_vector_down_1
+        MOV BYTE [snake_vector],2                    ; set down
+set_snakes_vector_down_1:
+        JMP set_snakes_vector_end
+
+set_snakes_vector_left:
+        CMP BYTE [snake_vector],4                    ; if not right
+        JE set_snakes_vector_left_1
+        CMP BYTE [snake_vector],0                    ; if not 'no move'
+        JE set_snakes_vector_left_1
+        MOV BYTE [snake_vector],3                    ; set left
+set_snakes_vector_left_1:
+        JMP set_snakes_vector_end
+
+set_snakes_vector_right:
+        CMP BYTE [snake_vector],3                    ; if not left
+        JE set_snakes_vector_right_1
+        MOV BYTE [snake_vector],4                    ; set right
+set_snakes_vector_right_1:
+        JMP set_snakes_vector_end
+
+set_snakes_vector_end:
+        POP AX
+        RET
+
+
+reset_snake:
+        MOV WORD [snake + 14],60
+        MOV WORD [snake + 12],25
+        MOV WORD [snake + 10],60
+        MOV WORD [snake + 8],30
+        MOV WORD [snake + 6],60
+        MOV WORD [snake + 4],35
+        MOV WORD [snake + 2],60
+        MOV WORD [snake],40
+        MOV WORD [snake_len],4
+        MOV BYTE [snake_vector],0
+        RET
+
+
+reset_food:
+        PUSH AX
+        PUSH BX
+        PUSH CX
+; random food x
+        MOV AL,58                                    ; max area width / 5
+        CALL random
+        MOV AH,0
+        MOV AL,CL
+        MOV BX,5
+        MUL BX
+        ADD AX,5
+        MOV [snakes_food_x],AX
+; random food y
+        MOV AL,35                                    ; max area height / 5
+        CALL random
+        MOV AH,0
+        MOV AL,CL
+        MOV BX,5
+        MUL BX
+        ADD AX,20
+        MOV [snakes_food_y],AX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+increase_snake:                                      ; snake++ :), new head = food position
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+        MOV CX,[snake_len]
+increase_snake_1:
+        PUSH CX
+        DEC CX
+        MOV BX,snake
+        MOV AX,CX
+        MOV CX,4
+        MUL CX
+        ADD BX,AX
+        MOV AX,[BX]
+        MOV CX,[BX + 2]
+        MOV [BX + 4],AX
+        MOV [BX + 6],CX
+        POP CX
+        LOOP increase_snake_1
+        MOV AX,[snakes_food_x]
+        MOV [snake],AX
+        MOV AX,[snakes_food_y]
+        MOV [snake + 2],AX
+        INC WORD [snake_len]
+        MOV AX,[snake_len]
+        CMP AX,[snake_max_len]                       ; if snake_len == snake_max_len then print winner msg and quit
+        JE increase_snake_max_len
+        JMP increase_snake_end
+increase_snake_max_len:
+        CALL winner
+increase_snake_end:
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+detect_collisions:                                   ; detect collisions beetwen objects
+        PUSH AX
+        PUSH BX
+        PUSH CX
+        PUSH DX
+; detect head and food collision
+        MOV AX,[snakes_food_x]
+        CMP AX,[snake]                               ; compare food x with head x
+        JNE detect_collisions_1
+        MOV AX,[snakes_food_y]
+        CMP AX,[snake + 2]                           ; compare food y with head y
+        JNE detect_collisions_1
+; add points and increase snake
+        ADD WORD [score],10                          ; add 10 points :)
+        CALL increase_snake
+        CALL reset_food
+detect_collisions_1:
+; detect collision with border and decrase lives
+        CMP WORD [snake],0                           ; coll. with left border
+        JE detect_collisions_dead
+        CMP WORD [snake],320 - 5                     ; coll. with right border
+        JE detect_collisions_dead
+        CMP WORD [snake + 2],15                      ; coll. with top border
+        JE detect_collisions_dead
+        CMP WORD [snake + 2],200 - 5                 ; coll. with bottom border
+        JE detect_collisions_dead
+; detect head collision with body
+        MOV BX,snake
+        ADD BX,8                                     ; jump to next x&y
+        MOV AX,[snake]
+        MOV DX,[snake + 2]
+        MOV CX,[snake_len]
+        DEC CX
+detect_collisions_head_with_body:
+        CMP AX,[BX]
+        JNE detect_collisions_head_with_body_next
+        CMP DX,[BX + 2]
+        JE detect_collisions_dead
+detect_collisions_head_with_body_next:
+        ADD BX,4
+        LOOP detect_collisions_head_with_body
+; if everything is ok the jump to the end
+        JMP detect_collisions_end
+detect_collisions_dead:
+        CALL reset_snake
+        CALL reset_food
+        DEC BYTE [live_counter]
+        MOV AX,1000
+        CALL draw_screen
+        CALL sound_on
+        CALL delay
+        CALL sound_off
+detect_collisions_end:
+        POP DX
+        POP CX
+        POP BX
+        POP AX
+        RET
+
+
+main:
+        CALL init13h
+        CALL install_keyboard
+        CALL install_timer
+        CALL set_palette
+        CALL random_init
+; setup snake
+        CALL reset_snake
+        CALL reset_food
+game_loop:
+; synchronize game
+        CMP BYTE [can_update],1
+        JNE game_loop
+        MOV BYTE [can_update],0
+; clear screen buffer
+        MOV CL,0
+        CALL clear_screen
+; draw frame
+        MOV BX,sprite_frame_box
+        MOV WORD [SW],5
+        MOV WORD [SH],5
+; draw top frame
+        MOV WORD [SX],0
+        MOV WORD [SY],0
+        MOV CX,320 / 5
+draw_frame_top:
+        CALL draw_sprite
+        ADD WORD [SX],5
+        LOOP draw_frame_top
+; draw bottom frame
+        MOV WORD [SX],0
+        MOV WORD [SY],200 - 5
+        MOV CX,320 / 5
+draw_frame_bottom:
+        CALL draw_sprite
+        ADD WORD [SX],5
+        LOOP draw_frame_bottom
+; draw left frame
+        MOV WORD [SX],0
+        MOV WORD [SY],0
+        MOV CX,200 / 5
+draw_frame_left:
+        CALL draw_sprite
+        ADD WORD [SY],5
+        LOOP draw_frame_left
+; draw_frame_right
+        MOV WORD [SX],320 - 5
+        MOV WORD [SY],0
+        MOV CX,200 / 5
+draw_frame_right:
+        CALL draw_sprite
+        ADD WORD [SY],5
+        LOOP draw_frame_right
+; draw top bar
+        MOV WORD [PX1],5
+        MOV WORD [PY1],5
+        MOV WORD [PX2],320 - 5 - 1
+        MOV WORD [PY2],5 + 13 + 1
+        MOV BYTE [PCL],43
+        CALL rectfill
+        MOV BYTE [PCL],53
+        CALL rect
+; draw logo
+        MOV BX,sprite_logo
+        MOV WORD [SX],320 / 2 - 54 / 2
+        MOV WORD [SY],7
+        MOV WORD [SW],54
+        MOV WORD [SH],11
+        CALL draw_transparent_sprite
+; draw live counter
+        MOV BX,sprite_snake_live_0
+        MOV WORD [SW],13
+        MOV WORD [SH],11
+        MOV WORD [SY],7
+        MOV WORD [SX],320 - 5 - 18
+        CALL draw_transparent_sprite
+        MOV WORD [SX],320 - 5 - 18 - 18
+        CALL draw_transparent_sprite
+        MOV WORD [SX],320 - 5 - 18 - 18 - 18
+        CALL draw_transparent_sprite
+        MOV BX,sprite_snake_live_1
+        CMP BYTE [live_counter],0                    ; if game over
+        JE counter_game_over
+        JMP counter_draw_live
+counter_game_over:
+        CALL game_over
+counter_draw_live:
+        MOV WORD [SX],320 - 5 - 18
+        CALL draw_transparent_sprite
+        CMP BYTE [live_counter],2
+        JB draw_live_counter_end
+        MOV WORD [SX],320 - 5 - 18 - 18
+        CALL draw_transparent_sprite
+        CMP BYTE [live_counter],3
+        JB draw_live_counter_end
+        MOV WORD [SX],320 - 5 - 18 - 18 - 18
+        CALL draw_transparent_sprite
+draw_live_counter_end:
+; draw score
+        MOV AX,10
+        MOV BX,9
+        MOV CL,32                                    ; white
+        MOV DX,[score]
+        CALL draw_integer
+; draw snakes food
+        MOV AX,[snakes_food_x]
+        MOV [SX],AX
+        MOV AX,[snakes_food_y]
+        MOV [SY],AX
+        MOV WORD [SW],5
+        MOV WORD [SH],5
+        MOV BX,sprite_snakes_food
+        CALL draw_transparent_sprite
+; draw snake
+        MOV BX,sprite_snake
+        MOV WORD [SW],5
+        MOV WORD [SH],5
+        MOV CX,[snake_len]
+draw_snake:
+        PUSH CX
+        DEC CX
+        PUSH BX
+        MOV BX,snake
+        MOV AX,CX
+        MOV CX,4
+        MUL CX
+        ADD BX,AX
+        MOV AX,[BX]
+        MOV [SX],AX
+        MOV AX,[BX + 2]
+        MOV [SY],AX
+        POP BX
+        CALL draw_sprite
+        POP CX
+        LOOP draw_snake
+; check keys
+        CMP BYTE [key + KEY_UP],1
+        JE key_up
+        CMP BYTE [key + KEY_DOWN],1
+        JE key_down
+        CMP BYTE [key + KEY_LEFT],1
+        JE key_left
+        CMP BYTE [key + KEY_RIGHT],1
+        JE key_right
+        CMP BYTE [key + KEY_A],1
+        JE key_a
+        CMP BYTE [key + KEY_P],1
+        JE key_p
+        CMP BYTE [key + KEY_ESC],1                   ; if ESC then quit
+        JE key_esc
+        JMP game_loop_end
+key_esc:
+        CALL exit
+key_up:
+        MOV AL,1
+        CALL set_snakes_vector
+        JMP game_loop_end
+key_down:
+        MOV AL,2
+        CALL set_snakes_vector
+        JMP game_loop_end
+key_left:
+        MOV AL,3
+        CALL set_snakes_vector
+        JMP game_loop_end
+key_right:
+        MOV AL,4
+        CALL set_snakes_vector
+        JMP game_loop_end
+key_p:
+        CALL game_pause
+        JMP game_loop_end
+key_a:
+; print info
+        MOV CL,91
+        MOV AX,320 / 2 - 5 * 8 / 2
+        MOV BX,80
+        MOV DX,text_about1
+        CALL draw_text
+        MOV CL,32
+        MOV AX,320 / 2 - 11 * 8 / 2
+        MOV BX,90
+        MOV DX,text_about2
+        CALL draw_text
+        MOV CL,32
+        MOV AX,320 / 2 - 12 * 8 / 2
+        MOV BX,100
+        MOV DX,text_about3
+        CALL draw_text
+        MOV CL,63
+        MOV AX,320 / 2 - 14 * 8 / 2
+        MOV BX,110
+        MOV DX,text_about4
+        CALL draw_text
+        JMP game_loop_end
+game_loop_end:
+; move snake
+        CALL move_snake
+; detect collisions
+        CALL detect_collisions
+; redraw screen buffer
+        CALL draw_screen
+        JMP game_loop
+game_pause:
+        MOV CL,91
+        MOV AX,320 / 2 - 5 * 8 / 2
+        MOV BX,95
+        MOV DX,text_pause
+        CALL draw_text
+        CALL draw_screen
+        CALL wait_for_any_key
+        RET
+game_over:
+        MOV CL,128
+        MOV AX,320 / 2 - 9 * 8 / 2
+        MOV BX,95
+        MOV DX,text_game_over
+        CALL draw_text
+        CALL draw_screen
+        CALL wait_for_any_key
+        JMP exit
+winner:
+        MOV CL,160
+        MOV AX,320 / 2 - 27 * 8 / 2
+        MOV BX,90
+        MOV DX,text_winner1
+        CALL draw_text
+        MOV AX,320 / 2 - 26 * 8 / 2
+        MOV BX,100
+        MOV DX,text_winner2
+        CALL draw_text
+        CALL draw_screen
+        CALL wait_for_any_key
+        JMP exit
+exit:
+        CALL remove_timer
+        CALL remove_keyboard
+        CALL close13h
+        PUSH CS
+        POP DS                                       ; DS = CS (09h need it)
+        MOV AH,09H
+        MOV DX,text_end
+        INT 21H
+        MOV AX,4C00H
+        INT 21H
+;-------
+
+
+; data
+old_keyboard_int                       DD 0
+old_timer_int                          DD 0
+
+screen_buffer                          DD 0
+
+lastkey                                DB 0
+key                                    TIMES 128 DB 0
+
+timer_counter                          DB 0          ; 18 clock ticks
+timer_delay                            DB 1          ; 0 when 18 ticks
+
+can_update                             DB 0          ; if 1 then update game
+live_counter                           DB 3          ; 3..game over
+score                                  DW 0          ; game points
+
+snakes_food_x                          DW 160
+snakes_food_y                          DW 100
+
+snake                                  TIMES 120*2 DW 0
+snake_len                              DW 4
+snake_max_len                          DW 120
+snake_vector                           DB 0          ; 0 = no move, 1 = move up, 2 = move down, 3 = move left, 4 = move right
+
+SX                                     DW 0          ; sprite x
+SY                                     DW 0          ; sprite y
+SW                                     DW 0          ; sprite width
+SH                                     DW 0          ; sprite height
+
+PX1                                    DW 0          ; other x1
+PY1                                    DW 0          ; other y1
+PX2                                    DW 0          ; other x2
+PY2                                    DW 0          ; other y2
+PCL                                    DB 0          ; other color
+
+text_about1
+DB 'SNAKE',0
+
+text_about2
+DB 'CSE341',0
+
+text_about3
+DB 'By Sammam Reshad Meherab',0
+
+text_about4
+DB ' Hope you loved the game ',0
+
+text_pause
+DB 'PAUSE',0
+
+text_game_over
+DB 'GAME OVER',0
+
+text_winner1
+DB '!!! Your Snake is dead !!!',0
+
+text_winner2
+DB '!!! It was too big :) !!!',0
+
+text_end
+DB 'SNAKE Clone v1.0',10,13
+DB 'Copyright by Sammam reshad meherab',10,13,10,13
+DB 'This game is our hardwork for CSE341!',10,13
+DB 'CSE341 RULEZ :)','$'
+
+
+sprite_logo                                          ; 54x11 - main logo
+DB   0,  0,158,158,158,158,158,158,  0,  0,  0,158,  0,  0,  0,  0,  0,  0,  0,158,158,  0,  0,  0,  0,  0,158,158,158,158,  0,  0,  0,  0,  0,158,158,  0,  0,  0,  0,158,158,  0,  0,  0,158,158,158,158,158,158,158,158
+DB 158,158,158,158,158,158,158,158,  0,  0,  0,158,158,  0,  0,  0,  0,  0,  0,158,158,  0,  0,  0,  0,  0,158,158,158,158,  0,  0,  0,  0,  0,158,158,  0,  0,  0,158,158,158,  0,  0,  0,158,158,158,158,158,158,158,158
+DB 158,158,  0,  0,  0,  0,  0,  0,  0,  0,  0,158,158,158,  0,  0,  0,  0,  0,158,158,  0,  0,  0,  0,  0,158,158,  0,158,158,  0,  0,  0,  0,158,158,  0,  0,158,158,158,  0,  0,  0,  0,158,158,  0,  0,  0,  0,  0,  0
+DB 158,158,  0,  0,  0,  0,  0,  0,  0,  0,  0,158,158,158,158,158,  0,  0,  0,158,158,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,  0,158,158,  0,  0,  0,  0,  0,  0
+DB 158,158,158,158,158,158,  0,  0,  0,  0,  0,158,158,158,158,158,158,  0,  0,158,158,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,158,158,  0,158,158,158,  0,  0,  0,  0,  0,158,158,158,158,158,158,  0,  0
+DB   0,  0,158,158,158,158,158,158,  0,  0,  0,158,158,  0,158,158,158,158,158,158,158,  0,  0,  0,  0,158,158,  0,  0,  0,158,158,  0,  0,  0,158,158,158,158,158,158,158,  0,  0,  0,  0,158,158,158,158,158,158,  0,  0
+DB   0,  0,  0,  0,  0,  0,158,158,158,  0,  0,158,158,  0,  0,  0,158,158,158,158,158,  0,  0,  0,158,158,158,158,158,158,158,158,  0,  0,  0,158,158,158,158,  0,158,158,158,  0,  0,  0,158,158,  0,  0,  0,  0,  0,  0
+DB   0,  0,  0,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,158,158,158,158,  0,  0,  0,158,158,158,158,158,158,158,158,  0,  0,  0,158,158,158,  0,  0,  0,158,158,  0,  0,  0,158,158,  0,  0,  0,  0,  0,  0
+DB   0,158,  0,  0,  0,  0,158,158,158,  0,  0,158,158,  0,  0,  0,  0,  0,158,158,158,  0,  0,158,158,158,  0,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,158,158,158,  0,  0,158,158,  0,  0,  0,  0,  0,  0
+DB 158,158,158,158,158,158,158,158,  0,  0,  0,158,158,  0,  0,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,  0,158,158,  0,  0,158,158,158,158,158,158,158,158
+DB   0,158,158,158,158,158,158,  0,  0,  0,  0,158,158,  0,  0,  0,  0,  0,  0,  0,158,  0,  0,158,158,  0,  0,  0,  0,  0,  0,158,158,  0,  0,158,158,  0,  0,  0,  0,  0,  0,158,  0,  0,158,158,158,158,158,158,158,158
+
+
+sprite_frame_box                                     ; 5x5 - main frame box
+DB  48, 48, 48, 48, 48
+DB  48, 53, 53, 53, 41
+DB  48, 53, 43, 53, 41
+DB  48, 53, 53, 53, 41
+DB  41, 41, 41, 41, 41
+
+
+sprite_snakes_food                                   ; 5x5 - snakes food :)
+DB   0,155,155,155,  0
+DB 155,157,157,157,151
+DB 155,157,161,154,151
+DB 155,157,154,154,151
+DB   0,151,151,151,  0
+
+
+sprite_snake                                         ; 5x5 - snakes body
+DB  97, 76, 83, 76, 97
+DB  76, 88, 88, 88, 76
+DB  83, 88, 88, 88, 83
+DB  76, 88, 88, 88, 76
+DB  97, 76, 83, 76, 97
+
+
+sprite_snake_live_1                                  ; 13x11 - live set
+DB   0,  0, 85, 85, 85, 90,  0,  0,  0,  0,  0,  0,  0
+DB   0, 85, 64, 85, 64, 85, 90,  0,  0,  0,  0,  0,  0
+DB   0,  0, 85, 85,  0,  0, 85, 90,  0,  0,  0,  0,  0
+DB   0,  0,161,  0,  0,  0, 85, 90,  0,  0,  0,  0,  0
+DB   0,157,  0,157,  0,  0, 85, 90,  0,  0,  0,  0,129
+DB   0,  0,  0,  0,  0, 85, 90,  0,  0,  0,  0,  0,146
+DB   0,  0,  0,  0, 85, 90,  0,  0,  0,  0,  0,  0,146
+DB   0,  0,  0, 85, 90,  0,  0,  0,  0,  0, 90, 90,  0
+DB   0,  0, 85, 90, 90,  0,  0,  0,  0, 90, 85, 85,  0
+DB   0,  0, 85, 90, 90, 90, 90, 90, 90, 85, 85,  0,  0
+DB   0,  0,  0, 85, 85, 85, 85, 85, 85, 85,  0,  0,  0
+
+
+sprite_snake_live_0                                  ; 13x11 - live reset
+DB   0,  0, 16, 16, 16, 23,  0,  0,  0,  0,  0,  0,  0
+DB   0, 16, 30, 16, 30, 16, 23,  0,  0,  0,  0,  0,  0
+DB   0,  0, 16, 16,  0,  0, 16, 23,  0,  0,  0,  0,  0
+DB   0,  0, 21,  0,  0,  0, 16, 23,  0,  0,  0,  0,  0
+DB   0, 21,  0, 21,  0,  0, 16, 23,  0,  0,  0,  0, 30
+DB   0,  0,  0,  0,  0, 16, 23,  0,  0,  0,  0,  0, 11
+DB   0,  0,  0,  0, 16, 23,  0,  0,  0,  0,  0,  0, 11
+DB   0,  0,  0, 16, 23,  0,  0,  0,  0,  0, 23, 23,  0
+DB   0,  0, 16, 23, 23,  0,  0,  0,  0, 23, 16, 16,  0
+DB   0,  0, 16, 23, 23, 23, 23, 23, 23, 16, 16,  0,  0
+DB   0,  0,  0, 16, 16, 16, 16, 16, 16, 16,  0,  0,  0
+
+
+palette                                              ; game palette
+DB   0,  0,  0
+DB   0,  0,  0
+DB   2,  2,  2
+DB   4,  4,  4
+DB   6,  6,  6
+DB   8,  8,  8
+DB  10, 10, 10
+DB  12, 12, 12
+DB  14, 14, 14
+DB  16, 16, 16
+DB  18, 18, 18
+DB  20, 20, 20
+DB  22, 22, 22
+DB  24, 24, 24
+DB  26, 26, 26
+DB  28, 28, 28
+DB  30, 30, 30
+DB  32, 32, 32
+DB  34, 34, 34
+DB  36, 36, 36
+DB  38, 38, 38
+DB  40, 40, 40
+DB  42, 42, 42
+DB  44, 44, 44
+DB  46, 46, 46
+DB  48, 48, 48
+DB  50, 50, 50
+DB  52, 52, 52
+DB  54, 54, 54
+DB  56, 56, 56
+DB  58, 58, 58
+DB  60, 60, 60
+DB  62, 62, 62
+DB   0,  0,  0
+DB   0,  0,  2
+DB   0,  0,  4
+DB   0,  0,  6
+DB   0,  0,  8
+DB   0,  0, 10
+DB   0,  0, 12
+DB   0,  0, 14
+DB   0,  0, 16
+DB   0,  0, 18
+DB   0,  0, 20
+DB   0,  0, 22
+DB   0,  0, 24
+DB   0,  0, 26
+DB   0,  0, 28
+DB   0,  0, 30
+DB   0,  0, 32
+DB   0,  0, 34
+DB   0,  0, 36
+DB   0,  0, 38
+DB   0,  0, 40
+DB   0,  0, 42
+DB   0,  0, 44
+DB   0,  0, 46
+DB   0,  0, 48
+DB   0,  0, 50
+DB   0,  0, 52
+DB   0,  0, 54
+DB   0,  0, 56
+DB   0,  0, 58
+DB   0,  0, 60
+DB   0,  0, 62
+DB   0,  0,  0
+DB   0,  0,  0
+DB   0,  2,  0
+DB   0,  4,  0
+DB   0,  6,  0
+DB   0,  8,  0
+DB   0, 10,  0
+DB   0, 12,  0
+DB   0, 14,  0
+DB   0, 16,  0
+DB   0, 18,  0
+DB   0, 20,  0
+DB   0, 22,  0
+DB   0, 24,  0
+DB   0, 26,  0
+DB   0, 28,  0
+DB   0, 30,  0
+DB   0, 32,  0
+DB   0, 34,  0
+DB   0, 36,  0
+DB   0, 38,  0
+DB   0, 40,  0
+DB   0, 42,  0
+DB   0, 44,  0
+DB   0, 46,  0
+DB   0, 48,  0
+DB   0, 50,  0
+DB   0, 52,  0
+DB   0, 54,  0
+DB   0, 56,  0
+DB   0, 58,  0
+DB   0, 60,  0
+DB   0, 62,  0
+DB   0,  0,  0
+DB   2,  0,  0
+DB   4,  0,  0
+DB   6,  0,  0
+DB   8,  0,  0
+DB  10,  0,  0
+DB  12,  0,  0
+DB  14,  0,  0
+DB  16,  0,  0
+DB  18,  0,  0
+DB  20,  0,  0
+DB  22,  0,  0
+DB  24,  0,  0
+DB  26,  0,  0
+DB  28,  0,  0
+DB  30,  0,  0
+DB  32,  0,  0
+DB  34,  0,  0
+DB  36,  0,  0
+DB  38,  0,  0
+DB  40,  0,  0
+DB  42,  0,  0
+DB  44,  0,  0
+DB  46,  0,  0
+DB  48,  0,  0
+DB  50,  0,  0
+DB  52,  0,  0
+DB  54,  0,  0
+DB  56,  0,  0
+DB  58,  0,  0
+DB  60,  0,  0
+DB  62,  0,  0
+DB   0,  0,  0
+DB   2,  2,  0
+DB   4,  4,  0
+DB   6,  6,  0
+DB   8,  8,  0
+DB  10, 10,  0
+DB  12, 12,  0
+DB  14, 14,  0
+DB  16, 16,  0
+DB  18, 18,  0
+DB  20, 20,  0
+DB  22, 22,  0
+DB  24, 24,  0
+DB  26, 26,  0
+DB  28, 28,  0
+DB  30, 30,  0
+DB  32, 32,  0
+DB  34, 34,  0
+DB  36, 36,  0
+DB  38, 38,  0
+DB  40, 40,  0
+DB  42, 42,  0
+DB  44, 44,  0
+DB  46, 46,  0
+DB  48, 48,  0
+DB  50, 50,  0
+DB  52, 52,  0
+DB  54, 54,  0
+DB  56, 56,  0
+DB  58, 58,  0
+DB  60, 60,  0
+DB  62, 62,  0
+DB   0,  0,  0
+DB   2,  0,  2
+DB   4,  0,  4
+DB   6,  0,  6
+DB   8,  0,  8
+DB  10,  0, 10
+DB  12,  0, 12
+DB  14,  0, 14
+DB  16,  0, 16
+DB  18,  0, 18
+DB  20,  0, 20
+DB  22,  0, 22
+DB  24,  0, 24
+DB  26,  0, 26
+DB  28,  0, 28
+DB  30,  0, 30
+DB  32,  0, 32
+DB  34,  0, 34
+DB  36,  0, 36
+DB  38,  0, 38
+DB  40,  0, 40
+DB  42,  0, 42
+DB  44,  0, 44
+DB  46,  0, 46
+DB  48,  0, 48
+DB  50,  0, 50
+DB  52,  0, 52
+DB  54,  0, 54
+DB  56,  0, 56
+DB  58,  0, 58
+DB  60,  0, 60
+DB  62,  0, 62
+DB   0,  0,  0
+DB   0,  2,  2
+DB   0,  4,  4
+DB   0,  6,  6
+DB   0,  8,  8
+DB   0, 10, 10
+DB   0, 12, 12
+DB   0, 14, 14
+DB   0, 16, 16
+DB   0, 18, 18
+DB   0, 20, 20
+DB   0, 22, 22
+DB   0, 24, 24
+DB   0, 26, 26
+DB   0, 28, 28
+DB   0, 30, 30
+DB   0, 32, 32
+DB   0, 34, 34
+DB   0, 36, 36
+DB   0, 38, 38
+DB   0, 40, 40
+DB   0, 42, 42
+DB   0, 44, 44
+DB   0, 46, 46
+DB   0, 48, 48
+DB   0, 50, 50
+DB   0, 52, 52
+DB   0, 54, 54
+DB   0, 56, 56
+DB   0, 58, 58
+DB   0, 60, 60
+DB   0, 62, 62
+DB   0,  0, 32
+DB   2,  1, 33
+DB   4,  2, 34
+DB   6,  3, 35
+DB   8,  4, 36
+DB  10,  5, 37
+DB  12,  6, 38
+DB  14,  7, 39
+DB  16,  8, 40
+DB  18,  9, 41
+DB  20, 10, 42
+DB  22, 11, 43
+DB  24, 12, 44
+DB  26, 13, 45
+DB  28, 14, 46
+DB  30, 15, 47
+DB  32, 16, 48
+DB  34, 17, 49
+DB  36, 18, 50
+DB  38, 19, 51
+DB  40, 20, 52
+DB  42, 21, 53
+DB  44, 22, 54
+DB  46, 23, 55
+DB  48, 24, 56
+DB  50, 25, 57
+DB  52, 26, 58
+DB  54, 27, 59
+DB  56, 28, 60
+DB  58, 29, 61
+;-------
+
+
+; EOF
+
